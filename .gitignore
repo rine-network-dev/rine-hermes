@@ -1,0 +1,12 @@
+.e2e.env
+__pycache__/
+*.egg-info/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+dist/
+build/
+*.sqlite
+*.sqlite3

@@ -1,0 +1,127 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-rine"
+version = "0.1.0"
+description = "Official Hermes Agent plugin for the Rine network — 12 rine_* tools, an inbound wake channel, and a bundled skill for E2E-encrypted agent-to-agent messaging and groups"
+readme = "README.md"
+license = "EUPL-1.2"
+requires-python = ">=3.11,<3.14"
+authors = [{ name = "mmmbs", email = "mmmbs@proton.me" }]
+keywords = ["rine", "hermes", "hermes-agent", "agents", "tools", "e2ee", "messaging", "ai-agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: Security :: Cryptography",
+    "Typing :: Typed",
+]
+dependencies = [
+    # The rine SDK owns all crypto/HTTP/config resolution; never vendored. Dev/CI
+    # inject the editable local ./rine-sdk over this floor (compose.hermes.yml).
+    # hermes-agent is NOT a runtime dependency: the rig supplies it on PYTHONPATH;
+    # `import hermes_rine` and `python -m hermes_rine.onboard` work without it.
+    "rine>=0.2.2",
+    "pydantic>=2.0",
+]
+
+[project.urls]
+Homepage = "https://rine.network"
+Documentation = "https://docs.rine.network"
+Repository = "https://codeberg.org/rine/rine-hermes"
+Issues = "https://codeberg.org/rine/rine-hermes/issues"
+
+[project.entry-points."hermes_agent.plugins"]
+# Value is the MODULE (not module:attr). Hermes' loader (_load_entrypoint_module) does
+# ep.load() then getattr(module, "register"): a "hermes_rine:register" value loads the
+# FUNCTION, then looks for `.register` on it → "no register() function". The Hermes docs
+# example is `my-plugin = "my_plugin_package"` — point at the package.
+rine = "hermes_rine"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "aiosqlite>=0.20",
+    # The enable helper round-trips config.yaml; in the Hermes venv ruamel/pyyaml are
+    # always present (Hermes deps), but the standalone test env needs a YAML parser.
+    "pyyaml>=6.0",
+]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["phases/", "e2e/", "tests/"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_rine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 99
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "UP", "B", "SIM", "TCH",
+    "D101", "D102", "D103", "D107", "D205", "D400",
+]
+ignore = ["D100"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting `test_<what>_<when>_<expected>`; per-symbol
+# docstrings would be noise.
+"tests/**" = ["D101", "D102", "D103", "D107"]
+# The live E2E driver is a script (excluded from the sdist), not library code.
+"e2e/**" = ["D101", "D102", "D103", "D107", "E501"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+packages = ["hermes_rine"]
+mypy_path = "src"
+
+# Hermes internals (``tools.registry``, ``gateway.*``) are NOT a typed runtime
+# dependency — they are only present on PYTHONPATH inside a live Hermes process /
+# the Docker rig. At our boundary their values are legitimately ``Any`` (and the base
+# adapter is ``Any`` when Hermes is absent). Relaxing return-Any/subclass strictness on
+# exactly the boundary modules keeps the gate green WITH or WITHOUT hermes-agent
+# installed, without weakening checks on our own typed code (_journal/_format/_client/
+# _gate/_schemas). ``disable_error_code`` (not per-line ignores) avoids the
+# ``warn_unused_ignores`` trap when Hermes IS present.
+[[tool.mypy.overrides]]
+module = [
+    "hermes_rine.adapter",
+    "hermes_rine._poll",
+    "hermes_rine._sse",
+    "hermes_rine.tools.messaging",
+    "hermes_rine.tools.discovery",
+    "hermes_rine.tools.groups",
+]
+warn_return_any = false
+disable_error_code = ["no-any-return", "misc"]
+
+# ``enable`` dynamically imports an optional YAML lib (ruamel/pyyaml) + ``hermes_cli`` —
+# all absent / unstubbed off the Hermes venv, so their values are legitimately ``Any``
+# and the import errors are environment-dependent. Disable just the import-resolution
+# codes here (per-line ignores would be ``unused`` in the rig where the libs ARE present).
+[[tool.mypy.overrides]]
+module = ["hermes_rine.enable"]
+disable_error_code = ["import-untyped", "import-not-found"]

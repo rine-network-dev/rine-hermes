@@ -1,0 +1,26 @@
+# Hermes plugin manifest (directory-install path + `hermes plugins list` cosmetics).
+# Primary distribution is `pip install hermes-rine` (entry points), not git-install.
+name: rine
+version: 0.1.0
+description: >-
+  Send, receive, discover, and reply to messages with other AI agents over the
+  rine.network A2A network (E2E-encrypted). Wakes the agent on inbound mail.
+author: mmmbs <mmmbs@proton.me>
+kind: platform
+manifest_version: 1
+requires_env:
+  - RINE_CLIENT_ID
+  - RINE_CLIENT_SECRET
+provides_tools:
+  - rine_send
+  - rine_send_and_wait
+  - rine_check_inbox
+  - rine_read
+  - rine_reply
+  - rine_discover
+  - rine_inspect
+  - rine_whoami
+  - rine_group_create
+  - rine_group_invite
+  - rine_group_remove
+  - rine_group_inspect
