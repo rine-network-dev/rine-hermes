@@ -4,7 +4,9 @@
 here, SSE in ``_sse``) so the wake/dedupe/verify/ack policy lives in exactly one place.
 For one decrypted inbound message it, in order:
 
-1. **self-skip** — a message from the agent's own handle never wakes it.
+1. **self-skip** — a message from the agent's own handle never wakes it, with one
+   exception: a Funnel webhook (``rine.v1.webhook``) is a legitimate inbound event that
+   the relay self-sends as the agent (``from == to``), so it IS dispatched.
 2. **allowlist** — when ``RINE_ALLOWED_HANDLES`` is set, a disallowed sender is
    *quarantine-logged* (WARNING) and dropped — never silently swallowed (R8).
 3. **invalid signature** — a tampered/forged sender, or a stale/rotated key, raises
@@ -70,6 +72,11 @@ logger = logging.getLogger("hermes_rine.poll")
 # (MLS / unsupported) at INFO — both are drained, neither is dispatched.
 _SIG_FAILURE_MARKER = "signature verification failed"
 
+# The Funnel relay self-sends this type (from == to); it is the one legitimate self-send.
+# Compared as a literal so this wake exception never depends on the installed rine SDK
+# version exporting a named constant for it.
+_FUNNEL_WEBHOOK_TYPE = "rine.v1.webhook"
+
 
 def _sender_handle(msg: DecryptedMessage) -> str:
     """The sender's handle (falling back to the agent uuid) for keying + self-skip."""
@@ -79,6 +86,27 @@ def _sender_handle(msg: DecryptedMessage) -> str:
 def _is_signature_failure(decrypt_error: str) -> bool:
     """True when a ``decrypt_error`` indicates cryptographic sender-signature tampering."""
     return _SIG_FAILURE_MARKER in decrypt_error.lower()
+
+
+def _is_funnel_webhook(msg: DecryptedMessage) -> bool:
+    """True for a Funnel webhook (``rine.v1.webhook``), the one legitimate self-send.
+
+    The Funnel relay encrypts as the agent and self-sends (``from == to``), so a webhook
+    would otherwise be swallowed by the self-skip. Every OTHER self-sent type stays
+    suppressed (it is the agent's own outbound echo).
+    """
+    return msg.type == _FUNNEL_WEBHOOK_TYPE
+
+
+def _hook_name(msg: DecryptedMessage) -> str | None:
+    """The cleartext ``rine.hook_name`` for a Funnel webhook, or None.
+
+    The relay puts the hook name in cleartext ``metadata`` so the agent can tell which
+    hook fired without decrypting the body. Returns None for non-webhook messages or a
+    missing/non-string value.
+    """
+    name = msg.metadata.get("rine.hook_name")
+    return name if isinstance(name, str) and name else None
 
 
 async def _ack(adapter: RineAdapter, message_id: str) -> None:
@@ -110,8 +138,9 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
     message_id = str(msg.id)
     sender = _sender_handle(msg)
 
-    # 1. Never wake on our own outbound copy.
-    if sender and sender == adapter.agent_handle:
+    # 1. Never wake on our own outbound copy — EXCEPT a Funnel webhook, which the relay
+    #    legitimately self-sends as the agent (``from == to``) and must wake on.
+    if sender and sender == adapter.agent_handle and not _is_funnel_webhook(msg):
         return
 
     # 2. Allowlist: quarantine-LOG a disallowed sender, never silently drop.
@@ -174,6 +203,9 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
     body = render_message_body(msg)
     if msg.verification_status == "unverifiable":
         body = f"[unverified sender] {body}"
+    hook_name = _hook_name(msg)
+    if hook_name is not None:
+        body = f"[webhook: {hook_name}] {body}"
 
     event, source = _build_event(adapter, chat_id, is_group, body, msg, sender)
 

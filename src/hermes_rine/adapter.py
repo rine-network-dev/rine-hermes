@@ -155,7 +155,25 @@ class RineAdapter(BasePlatformAdapter):
         reply_to: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
-        """Route the agent's reply back to rine as a 1:1 / group send (or in-thread reply)."""
+        """Route the agent's reply back to rine as a 1:1 / group send (or in-thread reply).
+
+        A Funnel ``rine.v1.webhook`` is a self-send event (``from == to``): after the turn the
+        gateway auto-replies to the "sender", which for a webhook is THIS agent. rine forbids
+        self-sends (422 "Cannot send a message to the same agent"), and a webhook is a one-way
+        event with no one to reply to — so a self-addressed reply is skipped gracefully rather
+        than surfacing a spurious error to the agent. This is the outbound counterpart to the
+        inbound self-skip exemption in ``_poll._dispatch`` (REQ-FUNNEL self-send symmetry). The
+        agent's real actions — sends to peers or groups — are unaffected.
+        """
+        if (
+            not chat_id.startswith("#")
+            and self._agent_handle
+            and chat_id.strip().lower() == self._agent_handle.strip().lower()
+        ):
+            logger.info(
+                "[rine] skipping self-addressed reply (a webhook self-send has no reply target)"
+            )
+            return SendResult(success=True)
         logger.debug("[rine] outbound to %s (reply_to=%s)", chat_id, reply_to)
         try:
             if reply_to:

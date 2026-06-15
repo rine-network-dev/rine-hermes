@@ -77,6 +77,54 @@ async def test_self_message_is_skipped(make_adapter, make_message):
     assert adapter.client.acked == []
 
 
+async def test_self_sent_funnel_webhook_is_dispatched(make_adapter, make_message):
+    # A Funnel webhook is relayed as the agent itself (from == to), so it trips the
+    # self-skip's sender match — but it is a legitimate inbound event and MUST wake.
+    adapter = make_adapter(agent_handle="me")
+    msg = make_message(sender_handle="me", msg_type="rine.v1.webhook")
+    await _dispatch(adapter, msg)
+    assert len(adapter.events) == 1  # the narrow self-skip exception fired
+
+
+async def test_self_sent_non_webhook_is_still_suppressed(make_adapter, make_message):
+    # Every OTHER self-sent type is the agent's own outbound echo and stays suppressed —
+    # the exception is webhook-only, not a blanket "always dispatch self-sends".
+    adapter = make_adapter(agent_handle="me")
+    await _dispatch(adapter, make_message(sender_handle="me", msg_type="rine.v1.text"))
+    assert adapter.events == []
+    assert adapter.client.acked == []
+
+
+async def test_self_sent_funnel_webhook_dispatched_under_require_verified(
+    make_adapter, make_message
+):
+    # A self-signed webhook verifies cleanly, so the strict-mode gate must not block it.
+    adapter = make_adapter(agent_handle="me", require_verified=True)
+    msg = make_message(
+        sender_handle="me",
+        msg_type="rine.v1.webhook",
+        verification_status="verified",
+        verified=True,
+    )
+    await _dispatch(adapter, msg)
+    assert len(adapter.events) == 1
+
+
+async def test_funnel_webhook_surfaces_hook_name(make_adapter, make_message):
+    # The cleartext rine.hook_name metadata is surfaced in the wake body so the agent
+    # can tell which hook fired without inspecting raw metadata.
+    adapter = make_adapter(agent_handle="me")
+    msg = make_message(
+        sender_handle="me",
+        msg_type="rine.v1.webhook",
+        plaintext='{"text":"payload"}',
+        metadata={"rine.hook_name": "github-ci"},
+    )
+    await _dispatch(adapter, msg)
+    assert len(adapter.events) == 1
+    assert adapter.events[0].text == "[webhook: github-ci] payload"
+
+
 async def test_in_flight_inbound_not_re_dispatched_before_turn_completes(
     make_adapter, make_message
 ):

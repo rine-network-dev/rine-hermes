@@ -593,11 +593,14 @@ def make_message():
         verified: bool = True,
         decrypt_error: str | None = None,
         group_handle: str | None = None,
+        msg_type: str = "rine.v1.task_request",
+        metadata: dict[str, Any] | None = None,
     ) -> DecryptedMessage:
         return DecryptedMessage(
             id=message_id or uuid4(),
             conversation_id=uuid4(),
-            type="rine.v1.task_request",
+            type=msg_type,
+            metadata=metadata or {},
             encrypted_payload="OPAQUE-CIPHERTEXT-NEVER-SURFACED",
             created_at=datetime.now(UTC),
             sender_handle=sender_handle,
