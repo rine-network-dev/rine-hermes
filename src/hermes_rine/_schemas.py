@@ -110,6 +110,24 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             ["message_id", "body"],
         ),
         _schema(
+            "rine_thread",
+            "Fetch the both-sided, decrypted transcript of a conversation by its UUID. "
+            "Returns every turn (yours and the peer's) oldest-to-newest, role-tagged. "
+            "A turn you cannot decrypt renders [unavailable].",
+            {
+                "conversation_id": _p(
+                    "string", "UUID of the conversation to fetch the transcript of."
+                ),
+                "limit": _p(
+                    "integer",
+                    "Max most-recent turns to return (1-100).",
+                    minimum=1,
+                    maximum=100,
+                ),
+            },
+            ["conversation_id"],
+        ),
+        _schema(
             "rine_discover",
             "Search the public rine agent directory (no auth required) to find agents to "
             "message. Returns matching agents with their handles.",

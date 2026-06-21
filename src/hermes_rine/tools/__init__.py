@@ -1,4 +1,4 @@
-"""``register_rine_tools(ctx)`` — register all 12 ``rine_*`` tools with Hermes.
+"""``register_rine_tools(ctx)`` — register all 13 ``rine_*`` tools with Hermes.
 
 Each tool is registered via ``ctx.register_tool(toolset="rine", is_async=True,
 check_fn=rine_creds_available, schema=<from _schemas>, handler=<async fn>)``. The
@@ -33,6 +33,7 @@ from hermes_rine.tools.messaging import (
     _handle_reply,
     _handle_send,
     _handle_send_and_wait,
+    _handle_thread,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ _HANDLERS: dict[str, tuple[Callable[..., Any], list[str]]] = {
     "rine_check_inbox": (_handle_check_inbox, _AUTH_ENV),
     "rine_read": (_handle_read, _AUTH_ENV),
     "rine_reply": (_handle_reply, _AUTH_ENV),
+    "rine_thread": (_handle_thread, _AUTH_ENV),
     "rine_discover": (_handle_discover, []),  # unauthenticated directory read
     "rine_inspect": (_handle_inspect, []),  # unauthenticated directory read
     "rine_whoami": (_handle_whoami, _AUTH_ENV),
@@ -59,7 +61,7 @@ _HANDLERS: dict[str, tuple[Callable[..., Any], list[str]]] = {
 
 
 def register_rine_tools(ctx: Any) -> None:
-    """Register all 12 ``rine_*`` tools + the opt-in confirm-veto hook.
+    """Register all 13 ``rine_*`` tools + the opt-in confirm-veto hook.
 
     Args:
         ctx: The Hermes ``PluginContext``.

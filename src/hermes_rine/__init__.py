@@ -23,7 +23,7 @@ from typing import Any
 try:
     __version__ = version("hermes-rine")
 except PackageNotFoundError:  # not installed (e.g. running from a source checkout)
-    __version__ = "0.1.2"
+    __version__ = "0.2.0"
 
 
 def register(ctx: Any) -> None:

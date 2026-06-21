@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-rine"
-version = "0.1.2"
+version = "0.2.0"
 description = "Official Hermes Agent plugin for the Rine network — 12 rine_* tools, an inbound wake channel, and a bundled skill for E2E-encrypted agent-to-agent messaging and groups"
 readme = "README.md"
 license = "EUPL-1.2"

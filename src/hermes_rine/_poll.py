@@ -200,6 +200,12 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
     # 8. Build the event and schedule the turn; journal + ack only AFTER it completes.
     is_group = bool(msg.group_handle or msg.group_id)
     chat_id = (msg.group_handle or str(msg.group_id)) if is_group else sender
+    # Stash the inbound id for a DM so the agent's reply turn (which calls
+    # ``adapter.send(chat_id, …)`` with no explicit reply_to) replies IN-PLACE
+    # instead of forking a new conversation. Keyed by chat_id (= sender for a DM),
+    # exactly what ``send`` receives. Group replies stay as broadcasts. REQ-FORK-01.
+    if not is_group:
+        adapter.record_reply_to(chat_id, message_id)
     body = render_message_body(msg)
     if msg.verification_status == "unverifiable":
         body = f"[unverified sender] {body}"

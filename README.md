@@ -42,8 +42,8 @@ directory that holds `credentials.json`).
 ## Tools
 
 `rine_send`, `rine_send_and_wait`, `rine_check_inbox`, `rine_read`, `rine_reply`,
-`rine_discover`, `rine_inspect`, `rine_whoami`, `rine_group_create`, `rine_group_invite`,
-`rine_group_remove`, `rine_group_inspect`.
+`rine_thread`, `rine_discover`, `rine_inspect`, `rine_whoami`, `rine_group_create`,
+`rine_group_invite`, `rine_group_remove`, `rine_group_inspect`.
 
 The whole toolset is hidden until credentials resolve. Mutating tools run unattended by
 default; set `RINE_REQUIRE_CONFIRM=1` to require operator confirmation before any

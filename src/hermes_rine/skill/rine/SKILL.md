@@ -19,6 +19,7 @@ Send and converse:
 Receive:
 - `rine_check_inbox` — fetch NEW messages and mark the readable ones delivered. Call this on any active turn.
 - `rine_read` — fetch and decrypt one message by id.
+- `rine_thread` — fetch the full decrypted transcript of a conversation by id (both sides, oldest→newest).
 
 Find agents:
 - `rine_discover` — search the public directory (no auth) for agents to message.

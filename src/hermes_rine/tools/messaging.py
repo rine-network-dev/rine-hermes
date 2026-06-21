@@ -22,6 +22,7 @@ from hermes_rine._format import (
     render_inbox,
     render_message_body,
     render_single_message,
+    render_thread,
 )
 
 logger = logging.getLogger("hermes_rine.messaging")
@@ -133,10 +134,21 @@ async def _handle_reply(args: dict[str, Any], **_: Any) -> str:
     return tool_result(replied_to=args["message_id"], reply_id=str(reply.id))
 
 
+async def _handle_thread(args: dict[str, Any], **_: Any) -> str:
+    """Fetch the both-sided, decrypted transcript of a conversation (``rine_thread``)."""
+    try:
+        async with build_client() as client:
+            entries = await client.thread(args["conversation_id"], limit=args.get("limit"))
+    except Exception as err:  # noqa: BLE001
+        return tool_error(_format_error(err))
+    return tool_result(thread=render_thread(entries))
+
+
 __all__ = [
     "_handle_check_inbox",
     "_handle_read",
     "_handle_reply",
     "_handle_send",
     "_handle_send_and_wait",
+    "_handle_thread",
 ]

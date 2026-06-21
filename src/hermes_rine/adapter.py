@@ -27,9 +27,11 @@ from gateway.platforms.base import (  # type: ignore[import-not-found]
     BasePlatformAdapter,
     SendResult,
 )
+from rine import MessageType
 
 from hermes_rine._client import _format_error, build_client
 from hermes_rine._journal import ConsumedJournal
+from hermes_rine._replystash import ReplyStash
 
 if TYPE_CHECKING:
     from rine import RineClient
@@ -63,6 +65,11 @@ class RineAdapter(BasePlatformAdapter):
         # (post-delivery callback unfired). Guards against a poll interval shorter
         # than a turn re-dispatching the same still-``new`` message (double-wake).
         self._inflight: set[str] = set()
+        # Latest inbound message id per DM chat_id, so the agent's reply turn replies
+        # IN-PLACE (same conversation) instead of forking via send(). Keyed by chat_id
+        # (= the DM sender handle, what `send` receives), so `send` looks it up without
+        # recomputing the session key. REQ-FORK-01.
+        self._reply_stash = ReplyStash()
         logger.info("[rine] adapter initialised (transport=%s)", self._transport)
 
     # -- properties the transports read (one stable seam) ------------------------------
@@ -103,6 +110,14 @@ class RineAdapter(BasePlatformAdapter):
     def inflight(self) -> set[str]:
         """Ids whose turn is scheduled but not yet completed (in-flight wake guard)."""
         return self._inflight
+
+    def record_reply_to(self, chat_id: str, message_id: str) -> None:
+        """Stash the latest inbound message id for a DM ``chat_id`` (REQ-FORK-01).
+
+        ``send`` reads this so a reply to a DM lands in the inbound conversation
+        (reply-in-place) instead of forking. Bounded; see :class:`ReplyStash`.
+        """
+        self._reply_stash.record(chat_id, message_id)
 
     @property
     def running(self) -> bool:
@@ -157,6 +172,14 @@ class RineAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Route the agent's reply back to rine as a 1:1 / group send (or in-thread reply).
 
+        REQ-FORK-01 — a DM with a stashed inbound id and no explicit ``reply_to`` replies
+        IN-PLACE via ``client.reply`` (same conversation) instead of ``client.send`` (which
+        forks a NEW conversation). The change is conversation-routing only: we pass an
+        explicit ``message_type=TASK_REQUEST`` so the reply keeps the prior ``send`` default
+        (``client.reply``'s SDK default is ``TASK_RESPONSE``, which is loop-guard terminal and
+        would silently stop a multi-turn peer exchange). Group sends and explicit-``reply_to``
+        callers are unchanged; ``_poll._dispatch`` records the stash per inbound DM.
+
         A Funnel ``rine.v1.webhook`` is a self-send event (``from == to``): after the turn the
         gateway auto-replies to the "sender", which for a webhook is THIS agent. rine forbids
         self-sends (422 "Cannot send a message to the same agent"), and a webhook is a one-way
@@ -165,8 +188,9 @@ class RineAdapter(BasePlatformAdapter):
         inbound self-skip exemption in ``_poll._dispatch`` (REQ-FUNNEL self-send symmetry). The
         agent's real actions — sends to peers or groups — are unaffected.
         """
+        is_group = chat_id.startswith("#")
         if (
-            not chat_id.startswith("#")
+            not is_group
             and self._agent_handle
             and chat_id.strip().lower() == self._agent_handle.strip().lower()
         ):
@@ -174,10 +198,16 @@ class RineAdapter(BasePlatformAdapter):
                 "[rine] skipping self-addressed reply (a webhook self-send has no reply target)"
             )
             return SendResult(success=True)
-        logger.debug("[rine] outbound to %s (reply_to=%s)", chat_id, reply_to)
+        # Reply-in-place for a DM with a known inbound id (no explicit reply_to, not a group).
+        stashed_reply_to = reply_to or (None if is_group else self._reply_stash.get(chat_id))
+        logger.debug("[rine] outbound to %s (reply_to=%s)", chat_id, stashed_reply_to)
         try:
-            if reply_to:
-                msg = await self.client.reply(reply_to, {"text": content})
+            if stashed_reply_to:
+                msg = await self.client.reply(
+                    stashed_reply_to,
+                    {"text": content},
+                    message_type=MessageType.TASK_REQUEST,
+                )
             else:
                 msg = await self.client.send(chat_id, {"text": content})
         except Exception as err:  # noqa: BLE001 — never raise into the gateway send path

@@ -1,7 +1,7 @@
 """``register(ctx)`` wiring tests (SPEC §5 "Skill / register").
 
 A fake ``PluginContext`` (``RecordingCtx``) captures every registration call so we can
-assert the plugin wires exactly 12 tools + 1 skill + 1 platform (+ the opt-in
+assert the plugin wires exactly 13 tools + 1 skill + 1 platform (+ the opt-in
 ``pre_tool_call`` hook), and that nothing touches the network at import or register
 time. ``register()`` only runs inside a Hermes process, so the Hermes-internal modules
 it imports are resolved from the rig (or the conftest doubles on a bare host).
@@ -21,6 +21,7 @@ _EXPECTED_TOOLS = [
     "rine_check_inbox",
     "rine_read",
     "rine_reply",
+    "rine_thread",
     "rine_discover",
     "rine_inspect",
     "rine_whoami",
@@ -44,9 +45,9 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", original)
 
 
-def test_register_records_twelve_tools(fake_ctx):
+def test_register_records_thirteen_tools(fake_ctx):
     hermes_rine.register(fake_ctx)
-    assert len(fake_ctx.tools) == 12
+    assert len(fake_ctx.tools) == 13
 
 
 def test_register_tool_names_match_the_contract(fake_ctx):
@@ -94,7 +95,7 @@ def test_each_tool_schema_is_an_openai_function_dict(fake_ctx):
 def test_register_touches_no_network(fake_ctx, no_network):
     # The socket guard raises if register() opens a connection.
     hermes_rine.register(fake_ctx)
-    assert len(fake_ctx.tools) == 12
+    assert len(fake_ctx.tools) == 13
 
 
 def test_importing_hermes_rine_exposes_version_and_register():

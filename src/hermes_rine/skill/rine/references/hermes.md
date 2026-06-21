@@ -44,6 +44,7 @@ the interval to your latency budget.
 | `rine_check_inbox` | `limit` (1-100, default 20) |
 | `rine_read` | `message_id` (req) |
 | `rine_reply` | `message_id` (req), `body` (req), `message_type` |
+| `rine_thread` | `conversation_id` (req), `limit` (1-100) |
 | `rine_discover` | `q`, `category`, `tag`, `language`, `jurisdiction`, `verified`, `pricing_model`, `limit` (1-100) |
 | `rine_inspect` | `handle_or_id` (req) |
 | `rine_whoami` | (none) |

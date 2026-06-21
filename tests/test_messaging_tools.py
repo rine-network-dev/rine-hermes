@@ -23,6 +23,7 @@ from hermes_rine.tools.messaging import (
     _handle_reply,
     _handle_send,
     _handle_send_and_wait,
+    _handle_thread,
 )
 
 from .conftest import (
@@ -426,6 +427,109 @@ class TestRead:
         data = json.loads(out)
         assert "Not found" in data["error"]
         assert "message not found" in data["error"]
+
+
+# =====================================================================
+# rine_thread (REQ-TOOL-01)
+# =====================================================================
+
+
+class TestThread:
+    @respx.mock
+    async def test_thread_renders_role_tagged_transcript(self, config_dir):
+        mock_token()
+        mock_agents()
+        mock_self_keys(config_dir)
+        received_ct = hpke_self_encrypt(config_dir, {"text": "peer turn one"})
+        row = message_payload(
+            encryption_version=EncryptionVersion.HPKE_V1,
+            encrypted_payload=received_ct,
+            from_agent_id=OTHER_AGENT_ID,
+            to_agent_id=AGENT_ID,
+        )
+        row["direction"] = "received"
+        row["sender_handle"] = OTHER_HANDLE
+        respx.get(f"{API_URL}/conversations/{CONVERSATION_ID}/messages").mock(
+            return_value=httpx.Response(200, json={"messages": [row], "truncated": False})
+        )
+
+        out = await _handle_thread({"conversation_id": CONVERSATION_ID})
+
+        data = json.loads(out)
+        assert f"[received] {OTHER_HANDLE}: peer turn one" in data["thread"]
+        assert received_ct not in out
+
+    @respx.mock
+    async def test_thread_renders_sent_received_and_unavailable_rows(self, config_dir):
+        """REQ-TOOL-01 AC: both-sided transcript renders all row kinds.
+
+        ``[sent] you``, ``[received]``, and an ``[unavailable]`` passthrough all
+        render via ``_render_thread_line``.
+        """
+        mock_token()
+        mock_agents()
+        mock_self_keys(config_dir)
+        sent_ct = hpke_self_encrypt(config_dir, {"text": "my turn one"})
+        received_ct = hpke_self_encrypt(config_dir, {"text": "peer turn one"})
+
+        sent_row = message_payload(
+            encryption_version=EncryptionVersion.HPKE_V1,
+            encrypted_payload="ZHVtbXk=",  # peer-sealed copy the sender cannot open
+            from_agent_id=AGENT_ID,
+            to_agent_id=OTHER_AGENT_ID,
+        )
+        sent_row["direction"] = "sent"
+        sent_row["self_encrypted_payload"] = sent_ct
+
+        received_row = message_payload(
+            encryption_version=EncryptionVersion.HPKE_V1,
+            encrypted_payload=received_ct,
+            from_agent_id=OTHER_AGENT_ID,
+            to_agent_id=AGENT_ID,
+        )
+        received_row["direction"] = "received"
+        received_row["sender_handle"] = OTHER_HANDLE
+
+        # A sent row with no self-blob → the SDK degrades it to ``[unavailable]``.
+        unavailable_row = message_payload(
+            encryption_version=EncryptionVersion.HPKE_V1,
+            encrypted_payload="ZHVtbXk=",
+            from_agent_id=AGENT_ID,
+            to_agent_id=OTHER_AGENT_ID,
+        )
+        unavailable_row["direction"] = "sent"
+
+        respx.get(f"{API_URL}/conversations/{CONVERSATION_ID}/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "messages": [sent_row, received_row, unavailable_row],
+                    "truncated": False,
+                },
+            )
+        )
+
+        out = await _handle_thread({"conversation_id": CONVERSATION_ID})
+
+        data = json.loads(out)
+        assert "[sent] you: my turn one" in data["thread"]
+        assert f"[received] {OTHER_HANDLE}: peer turn one" in data["thread"]
+        assert "[sent] you: [unavailable]" in data["thread"]
+        assert sent_ct not in out  # ciphertext never surfaces
+        assert received_ct not in out
+
+    @respx.mock
+    async def test_thread_empty_conversation(self, config_dir):
+        mock_token()
+        mock_agents()
+        respx.get(f"{API_URL}/conversations/{CONVERSATION_ID}/messages").mock(
+            return_value=httpx.Response(200, json={"messages": [], "truncated": False})
+        )
+
+        out = await _handle_thread({"conversation_id": CONVERSATION_ID})
+
+        data = json.loads(out)
+        assert data["thread"] == "No messages in this conversation."
 
 
 # =====================================================================

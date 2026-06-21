@@ -233,6 +233,24 @@ async def test_group_message_builds_group_source(make_adapter, make_message):
     assert _field(event.source, "chat_id") == "#research"
 
 
+async def test_dm_dispatch_stashes_inbound_id_for_in_place_reply(make_adapter, make_message):
+    # REQ-FORK-01: a DM dispatch records the inbound id under the sender's chat_id so the
+    # agent's later send(chat_id) reply lands in-place (same conversation, no fork).
+    adapter = make_adapter()
+    msg = make_message(sender_handle="alice")
+    await _dispatch(adapter, msg)
+    assert adapter._reply_stash.get("alice") == str(msg.id)
+
+
+async def test_group_dispatch_does_not_stash_a_reply_target(make_adapter, make_message):
+    # A group dispatch must NOT stash a 1:1 reply target — group replies are broadcasts.
+    adapter = make_adapter()
+    msg = make_message(sender_handle="alice", group_handle="#research")
+    await _dispatch(adapter, msg)
+    assert adapter._reply_stash.get("#research") is None
+    assert adapter._reply_stash.get("alice") is None
+
+
 async def test_failed_ack_then_redelivery_re_acks_not_re_dispatches(make_adapter, make_message):
     # First dispatch: turn completes, journal records, but the ack FAILS.
     adapter = make_adapter(fail_ack=True)

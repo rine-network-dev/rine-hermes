@@ -495,6 +495,15 @@ class FakeAdapter:
         # session_key -> registered (possibly chained) post-delivery callback.
         self._post_delivery_callbacks: dict[str, object] = {}
         self._raise_on_handle = bool(opts.get("raise_on_handle", False))
+        # Mirror the real adapter's reply-in-place stash (REQ-FORK-01): _dispatch
+        # records the inbound id per DM chat_id so the reply turn replies in-place.
+        from hermes_rine._replystash import ReplyStash
+
+        self._reply_stash = ReplyStash()
+
+    def record_reply_to(self, chat_id: str, message_id: str) -> None:
+        """Stash the latest inbound DM id (mirrors ``RineAdapter.record_reply_to``)."""
+        self._reply_stash.record(chat_id, message_id)
 
     def build_source(self, **kwargs: object) -> object:
         """Return a real ``SessionSource`` under real Hermes (the rig), else a dict double.
