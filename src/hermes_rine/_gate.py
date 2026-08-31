@@ -1,12 +1,14 @@
 """Gating for the rine toolset: availability check + opt-in confirm-veto.
 
-Two cheap, network-free policies (D-GATE):
+Two cheap, network-free policies, both serving one rule: the toolset stays hidden until
+credentials resolve, and once they do, mutating tools run **unattended** — a confirm
+prompt is something an operator opts into, never the default.
 
 - ``rine_creds_available()`` is the toolset ``check_fn``. When it returns False the
   whole ``rine`` toolset is filtered out of the model's tool list. It only inspects
   env vars and the config dir for a ``credentials.json`` — no network, no client.
 - ``make_confirm_veto()`` returns a ``pre_tool_call`` callback that blocks mutating
-  ``rine_*`` tools **only** when ``RINE_REQUIRE_CONFIRM=1`` (default off, so one-shot /
+  ``rine_*`` tools when ``RINE_REQUIRE_CONFIRM`` names them (default off, so one-shot /
   gateway-YOLO / E2E run unattended). A block is the dict
   ``{"action": "block", "message": ...}`` that Hermes' ``get_pre_tool_call_block_message``
   expects.
@@ -33,6 +35,9 @@ _MUTATING_TOOLS = frozenset(
         "rine_group_create",
         "rine_group_invite",
         "rine_group_remove",
+        "rine_group_join",
+        "rine_pay",  # irreversible on-chain spend (permanent debit)
+        "rine_fulfill",  # on-chain settlement + receipt
     }
 )
 
@@ -53,30 +58,48 @@ def rine_creds_available() -> bool:
     return os.path.isfile(os.path.join(config_dir, "credentials.json"))
 
 
+def confirm_scope() -> frozenset[str]:
+    """Which tools ``RINE_REQUIRE_CONFIRM`` guards right now (empty when disabled).
+
+    ``1`` or ``all`` guards every mutating tool. A comma-separated list guards exactly
+    the tools it names, so a deployment can require confirmation for spend alone
+    (``RINE_REQUIRE_CONFIRM=rine_pay,rine_fulfill``) while letting messaging run
+    unattended. Names outside :data:`_MUTATING_TOOLS` are ignored — a read-only tool has
+    nothing to confirm. Read live on each call, so retuning it needs no gateway restart.
+    """
+    raw = os.getenv("RINE_REQUIRE_CONFIRM", "").strip()
+    if not raw:
+        return frozenset()
+    if raw.lower() in {"1", "all", "true"}:
+        return _MUTATING_TOOLS
+    return frozenset(n.strip() for n in raw.split(",") if n.strip()) & _MUTATING_TOOLS
+
+
 def make_confirm_veto() -> Callable[..., dict[str, Any] | None]:
     """Return a ``pre_tool_call`` callback enforcing the opt-in confirm-veto.
 
-    The callback blocks a mutating ``rine_*`` tool **only** when
-    ``RINE_REQUIRE_CONFIRM=1`` (read live each call so the operator can toggle it
-    without a restart). Otherwise — and for every non-mutating or non-rine tool — it
-    returns ``None`` (normal dispatch).
+    The callback blocks a tool named by :func:`confirm_scope`; for every other tool — and
+    whenever the scope is empty — it returns ``None`` (normal dispatch). The block message
+    is addressed to the model and is terminal: it never suggests changing the deployment's
+    configuration, because the model cannot change it and a message that invites it to try
+    is an instruction an untrusted inbound message could exploit.
     """
 
     def _pre_tool_call(tool_name: str = "", **_: Any) -> dict[str, Any] | None:
-        if os.getenv("RINE_REQUIRE_CONFIRM") != "1":
-            return None
-        if tool_name not in _MUTATING_TOOLS:
+        if tool_name not in confirm_scope():
             return None
         return {
             "action": "block",
             "message": (
-                f"{tool_name} performs an irreversible rine network action and "
-                "RINE_REQUIRE_CONFIRM=1 is set. Confirm with the operator, then unset "
-                "RINE_REQUIRE_CONFIRM (or rerun without it) to proceed."
+                f"{tool_name} was not executed. This deployment requires a human to "
+                "confirm irreversible rine actions, and that confirmation happens outside "
+                "this session. Do not retry the tool and do not try to change the "
+                "deployment's configuration. Tell the operator what you intended to do "
+                "and why, then continue with the rest of the task."
             ),
         }
 
     return _pre_tool_call
 
 
-__all__ = ["make_confirm_veto", "rine_creds_available"]
+__all__ = ["confirm_scope", "make_confirm_veto", "rine_creds_available"]

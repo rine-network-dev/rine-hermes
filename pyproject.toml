@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-rine"
-version = "0.2.0"
-description = "Official Hermes Agent plugin for the Rine network — 12 rine_* tools, an inbound wake channel, and a bundled skill for E2E-encrypted agent-to-agent messaging and groups"
+version = "0.6.0"
+description = "Official Hermes Agent plugin for the Rine network — 25 rine_* tools (incl. x402 pay/fulfill), an inbound wake channel, and a bundled skill for E2E-encrypted agent-to-agent messaging, groups, and payments"
 readme = "README.md"
 license = "EUPL-1.2"
 requires-python = ">=3.11,<3.14"
@@ -27,7 +27,22 @@ dependencies = [
     # inject the editable local ./rine-sdk over this floor (compose.hermes.yml).
     # hermes-agent is NOT a runtime dependency: the rig supplies it on PYTHONPATH;
     # `import hermes_rine` and `python -m hermes_rine.onboard` work without it.
-    "rine>=0.2.2",
+    # Floor is 0.11.0, and it is the first floor here that is NOT documentation-grade —
+    # it is a hard import requirement. This plugin imports names the SDK first exported
+    # in 0.11.0 (`single_actor_value`, `may_vote`, `vote_eligibility_reason`,
+    # `describe_mls_admission`, `mls_admission_skip_sentence` among others), so against
+    # 0.10.0 `import hermes_rine` raises ImportError at module scope. Lower this floor
+    # and the plugin does not fail a call — it fails to load.
+    #
+    # 0.11.0 also inherits 0.10.0's reason for existing: it is at or above the first
+    # rine whose send path fetches the recipient's signing key fresh instead of reading
+    # a cached copy, so a peer that rotates its key is sent to under the new key on the
+    # very next message rather than up to ten minutes later. A seal is one-shot and
+    # reports nothing back, so a message sealed to a stale key is simply unreadable for
+    # its recipient — nothing in this plugin can detect or retry that. Signing
+    # (rine_pay) needs the SDK's `payments` extra (eth-account) — the rig installs
+    # `rine[payments]`; a real install that pays must too.
+    "rine>=0.11.0",
     "pydantic>=2.0",
 ]
 
@@ -55,10 +70,35 @@ dev = [
     # The enable helper round-trips config.yaml; in the Hermes venv ruamel/pyyaml are
     # always present (Hermes deps), but the standalone test env needs a YAML parser.
     "pyyaml>=6.0",
+    # x402 payer signing: `rine_pay` / gateway auto-pay exercise the real EIP-3009 sign
+    # path, so the dev/rig env always carries the SDK's (otherwise optional) `payments`
+    # extra. Listed DIRECTLY, not via `rine[payments]`, because the rig installs the local
+    # SDK with a bare `-e /work/rine-sdk` — uv drops editability when a path carries an
+    # extra, so the extra cannot ride on the SDK path. Mirrors langchain-rine's dev extra.
+    "eth-account>=0.13.0,<0.14",
 ]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["phases/", "e2e/", "tests/"]
+# .gitignore does NOT govern sdist contents — this list does. `.e2e.env` (live
+# rig credentials) shipped in every sdist through 0.3.0 because it was only
+# gitignored. Keep the env patterns; scripts/scan-artifact-secrets.py is the
+# backstop that fails the publish if anything credential-shaped slips back in.
+# `.uv-cache/`/`.venv/` are transient uv build artifacts that carry binaries
+# (e.g. ruff) whose bytes trip the credential scanner — never ship them.
+# `uv.lock` is excluded because a lock is only ever as fresh as its last re-lock
+# against a published registry, while the sdist's own METADATA carries the real
+# floor. Shipping one lets `uv sync` install an older `rine` than the plugin
+# imports — and `uv lock --check` reports that lock as current, so nothing warns.
+exclude = [
+    "phases/",
+    "e2e/",
+    "tests/",
+    ".e2e.env",
+    "*.env",
+    ".uv-cache/",
+    ".venv/",
+    "uv.lock",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_rine"]
@@ -109,11 +149,16 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = [
     "hermes_rine.adapter",
+    "hermes_rine._outbound",
     "hermes_rine._poll",
     "hermes_rine._sse",
     "hermes_rine.tools.messaging",
     "hermes_rine.tools.discovery",
     "hermes_rine.tools.groups",
+    "hermes_rine.tools.groups_admin",
+    "hermes_rine.tools.groups_list",
+    "hermes_rine.tools.groups_reclaim",
+    "hermes_rine.tools.payments",
 ]
 warn_return_any = false
 disable_error_code = ["no-any-return", "misc"]
@@ -123,5 +168,5 @@ disable_error_code = ["no-any-return", "misc"]
 # and the import errors are environment-dependent. Disable just the import-resolution
 # codes here (per-line ignores would be ``unused`` in the rig where the libs ARE present).
 [[tool.mypy.overrides]]
-module = ["hermes_rine.enable"]
+module = ["hermes_rine.enable", "hermes_rine.doctor"]
 disable_error_code = ["import-untyped", "import-not-found"]

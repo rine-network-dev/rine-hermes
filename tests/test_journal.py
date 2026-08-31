@@ -1,4 +1,4 @@
-"""Durability + idempotency tests for the consumed-id journal (D-WAKE exactly-once)."""
+"""Durability + idempotency tests: the wake fires once per message, across a restart too."""
 
 from __future__ import annotations
 

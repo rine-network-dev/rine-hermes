@@ -16,12 +16,12 @@ after a healthy run. ``disconnect()`` cancels the task, unwinding via ``Cancelle
 **Per-message isolation.** The per-event ``read()`` + ``_dispatch`` pair is wrapped in its
 own try/except *inside* the loop so a single bad message cannot tear down the live stream
 (the asymmetry the poll path doesn't have). ``CancelledError`` is re-raised so
-``disconnect()`` still unwinds. A poison-pill ``CryptoError`` (an undecryptable / tampered
-message — ``read()`` *raises* it on the SSE path, unlike the poll path where the SDK
-swallows it into ``decrypt_error``) is drained via the shared ``drain_poison_pill`` so it
-never wedges the stream — **never surfacing ciphertext**. A transient error (429 / 404 /
-timeout / 5xx) is logged at WARNING and the event is skipped (``continue``) rather than
-collapsing the whole connection into a reconnect.
+``disconnect()`` still unwinds. An undecryptable or tampered message is not an exception
+here: ``read()`` reports it on the message as ``decrypt_error`` (never raising), so it
+reaches ``_dispatch`` and is quarantined + drained by the shared policy, exactly as on the
+poll path — **never surfacing ciphertext**. A transient error (429 / 404 / timeout / 5xx)
+is logged at WARNING and the event is skipped (``continue``) rather than collapsing the
+whole connection into a reconnect.
 """
 
 from __future__ import annotations
@@ -31,9 +31,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from rine import CryptoError
-
-from hermes_rine._poll import _dispatch, drain_poison_pill
+from hermes_rine._poll import _dispatch
 
 if TYPE_CHECKING:
     from hermes_rine.adapter import RineAdapter
@@ -65,10 +63,9 @@ async def _consume_stream(adapter: RineAdapter) -> None:
     """Iterate one live stream connection, dispatching each ``message`` event once.
 
     Each event's ``read()`` + ``_dispatch`` is isolated so one bad message can't tear
-    down the stream: ``CancelledError`` re-raises (so ``disconnect()`` unwinds), a
-    poison-pill ``CryptoError`` is drained (never re-raised), and a transient error is
-    logged + skipped. Only an error from ``stream()`` iteration itself reaches
-    ``_sse_loop`` and triggers a reconnect.
+    down the stream: ``CancelledError`` re-raises (so ``disconnect()`` unwinds) and any
+    other error is logged + skipped. Only an error from ``stream()`` iteration itself
+    reaches ``_sse_loop`` and triggers a reconnect.
     """
     async for event in adapter.client.stream():
         if event.event != "message":
@@ -83,10 +80,6 @@ async def _consume_stream(adapter: RineAdapter) -> None:
             await _dispatch(adapter, msg)
         except asyncio.CancelledError:
             raise  # disconnect() requested unwind — propagate, never swallow
-        except CryptoError as err:
-            # Poison pill: the SDK raises here (poll swallows into decrypt_error). Drain
-            # it via the shared policy so it can't wedge the stream — no ciphertext.
-            await drain_poison_pill(adapter, message_id, str(err))
         except Exception:  # noqa: BLE001 — transient (429/404/timeout/5xx): skip this one
             logger.warning(
                 "rine sse: skipping message %s after a read/dispatch error",

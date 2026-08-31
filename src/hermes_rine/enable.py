@@ -1,10 +1,12 @@
 """``python -m hermes_rine.enable`` — idempotently enable the ``rine`` plugin.
 
-On this Hermes (v0.16.0) ``hermes plugins enable rine`` does **not** work for a pip
-*entry-point* plugin: ``_discover_all_plugins`` only scans bundled / user *directory*
-plugins, so it reports the plugin "not installed or bundled". The supported activation
-path is config-based — add ``rine`` to ``plugins.enabled`` in ``~/.hermes/config.yaml``.
-This helper does exactly that, idempotently, so the user never has to hand-edit YAML.
+Hermes' plugin **loader** does find a pip entry-point plugin like this one — it scans
+``importlib.metadata`` at startup — and activates whatever ``plugins.enabled`` lists. The
+``hermes plugins`` **command** is a separate discovery pass that walks bundled and user
+*directory* plugins only, so ``hermes plugins enable rine`` reports the plugin "not
+installed or bundled" even though it is installed and will load. Activation is therefore
+config-based: add ``rine`` to ``plugins.enabled`` in ``~/.hermes/config.yaml``. This helper
+does exactly that, idempotently, so the user never has to hand-edit YAML.
 
 Config-path resolution (first that works):
   1. ``hermes_cli.config.get_config_path()`` (authoritative; honours ``HERMES_HOME`` and
@@ -74,6 +76,14 @@ def _dump(path: Path, data: dict[str, Any], ruamel: object | None) -> None:
     import yaml as pyyaml
 
     path.write_text(pyyaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def enabled_plugins(config_path: Path | None = None) -> list[str]:
+    """The ``plugins.enabled`` list from the Hermes config (empty when absent)."""
+    data, _ = _load(config_path or resolve_config_path())
+    plugins = data.get("plugins")
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+    return [str(p) for p in enabled] if isinstance(enabled, list) else []
 
 
 def enable_rine(config_path: Path | None = None, *, plugin: str = "rine") -> bool:

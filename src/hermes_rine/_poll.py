@@ -8,18 +8,23 @@ For one decrypted inbound message it, in order:
    exception: a Funnel webhook (``rine.v1.webhook``) is a legitimate inbound event that
    the relay self-sends as the agent (``from == to``), so it IS dispatched.
 2. **allowlist** — when ``RINE_ALLOWED_HANDLES`` is set, a disallowed sender is
-   *quarantine-logged* (WARNING) and dropped — never silently swallowed (R8).
-3. **invalid signature** — a tampered/forged sender, or a stale/rotated key, raises
-   ``CryptoError`` inside the SDK, surfaced as a ``decrypt_error`` reading "Sender
-   signature verification failed" (``verification_status`` stays ``unverifiable``). We
-   special-case that text and **log it at WARNING** (the security-relevant audit trail),
-   then **drain it (journal + ack)** so it never replays. It is **never** dispatched.
-4. **decrypt_error** (any other) — genuinely unreadable (MLS / unsupported version):
+   *quarantine-logged* (WARNING) and dropped — never silently swallowed.
+2b. **terminal type** — an inbound type that closes an exchange rather than opening one
+   (``rine.v1.error``, ``rine.v1.receipt``) is drained without waking a turn. Answering a
+   peer's error notice with prose that the peer then answers is how two auto-replying
+   agents talk to each other indefinitely. ``RINE_IGNORE_TYPES`` overrides the set; set
+   it empty to wake on everything.
+3. **refused sender** — a signature that does not cover the bytes, or one that covers
+   them but belongs to an agent other than the row's sender, comes back with
+   ``verification_status`` ``"invalid"`` / ``"sender-mismatch"``. Both are **logged at
+   WARNING** (the security-relevant audit trail), then **drained (journal + ack)** so
+   they never replay. They are **never** dispatched.
+4. **decrypt_error** (any other) — genuinely unreadable (malformed / unsupported version):
    same drain (journal + ack), logged at INFO. Never dispatched: ciphertext / unreadable
-   payload must not reach the agent (R6). Draining (not "leave new") is deliberate — a
+   payload must not reach the agent. Draining (not "leave new") is deliberate — a
    real inbox with an unverifiable backlog would otherwise re-quarantine every poll.
 5. **unverifiable** — dispatched with an ``[unverified sender]`` note, unless
-   ``RINE_REQUIRE_VERIFIED=1`` blocks it (R8).
+   ``RINE_REQUIRE_VERIFIED=1`` blocks it.
 6. **already consumed** — a redelivered, already-journaled id is **re-acked** (so it
    finally leaves the inbox) and **skipped** for dispatch (exactly-once across restart).
 7. **in-flight** — an id whose turn is already running (registered a post-delivery
@@ -28,8 +33,18 @@ For one decrypted inbound message it, in order:
    ``new`` until the turn finishes and acks it.
 8. otherwise — build the source + ``MessageEvent(internal=True, auto_skill="rine:rine")``,
    register a **post-delivery callback** that journals (FIRST, durable) then acks
-   (best-effort) **only after the agent turn completes**, mark the id in-flight, then
-   ``await handle_message`` to *schedule* the turn.
+   (best-effort) **only after the agent turn completes**, open the turn (``adapter.turns``:
+   the wake guard, the chat that outbound policy reads, the type the reply mirrors), then
+   ``await handle_message`` to *schedule* the turn. The turn opens last of the four
+   because only the callback and the dispatch ``except`` ever close one.
+8x. **x402 payment frame** (a sub-case of step 8) — the three ``rine.v1.x402_*`` types wake
+   the agent *payment-aware* (structured context + the ``rine_pay`` / ``rine_fulfill``
+   tools) but NEVER stash a reply target: the prose auto-reply into the payment thread stays
+   suppressed (the tools reply in-thread with the signed payload / receipt themselves; the
+   turn's prose is dropped at ``adapter.send``). Opt-in gateway auto-pay
+   (``RINE_X402_AUTO_PAY``, default OFF) may settle a sub-threshold quote here without a
+   turn, then drain. An UNDECRYPTABLE x402 frame still drains at step 3/4 (no plaintext to
+   act on), never waking the agent.
 
 **Why a post-delivery callback?** ``BasePlatformAdapter.handle_message`` returns as soon
 as the turn is *scheduled* (it spawns a background task — base.py:3839,3678), NOT after
@@ -39,13 +54,16 @@ fires our callback only after ``_message_handler`` completes (base.py ~4510), so
 journal+ack to it: success → journaled+acked AFTER the turn (exactly-once); crash before
 the callback → message stays ``new`` + un-journaled → re-dispatched next poll
 (at-least-once, no loss); redelivery of a journaled id → re-acked, not re-dispatched.
+It fires last, after every post-turn send the gateway makes, which is also what keeps
+Hermes' human-facing crash text inside Hermes. ``RineAdapter.pop_post_delivery_callback``
+is what makes the gateway hand it back at all — see the method for why.
 
 **Known v0.1 edge case:** two inbound from the same sender in flight share a session key;
 ``register_post_delivery_callback`` *chains* callbacks for the same key and the pop is
 one-shot, so both fire after whichever turn completes next. Acceptable for v0.1 (distinct
 A2A conversations dominate); documented, not over-engineered.
 
-A dispatch (scheduling) failure removes the in-flight mark and leaves the id **neither
+A dispatch (scheduling) failure closes the turn again and leaves the id **neither
 journaled nor acked**, so it stays eligible. The ciphertext is never read — only
 ``render_message_body`` (plaintext / decrypt_error).
 """
@@ -54,9 +72,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
+from rine import MessageType, is_authenticity_failure
+from rine.sender_key_words import SenderKeyRefusal
+
 from hermes_rine._format import render_message_body
+from hermes_rine._outbound import ERROR_TYPE
+from hermes_rine._payer import maybe_auto_pay
+from hermes_rine._turns import InboundTurn
+from hermes_rine._x402 import is_x402, x402_wake_body
 
 if TYPE_CHECKING:
     from rine import DecryptedMessage
@@ -65,27 +91,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("hermes_rine.poll")
 
-# The SDK raises ``CryptoError("Sender signature verification failed")`` on a signature
-# mismatch (rine-sdk/src/rine/_crypto/message.py); inbox()/read() surface that text as
-# ``decrypt_error`` (verification_status stays "unverifiable"). Match it case-insensitively
-# so a signature failure is logged at WARNING (security-relevant) vs a benign unreadable
-# (MLS / unsupported) at INFO — both are drained, neither is dispatched.
-_SIG_FAILURE_MARKER = "signature verification failed"
+# Inbound types that close an exchange rather than open one, so they never wake a turn.
+# Matches the rine channel Eve ships (rine-eve/src/channel.ts): an error notice and a
+# delivery receipt are for the record, and answering one — which the peer then answers —
+# is how two auto-replying agents keep each other awake indefinitely. A drained message
+# stays readable through ``rine_thread``; only the wake is suppressed.
+#
+# ``rine.v1.task_response`` is deliberately absent, so two hermes agents answering each
+# other can still keep each other awake. A task_response is the answer to a question this
+# agent asked with ``rine_send``; draining it by default would mean an agent is never woken
+# by its own answer, which costs more than the loop it would prevent. An operator running
+# two hermes agents that talk to each other adds the type via ``RINE_IGNORE_TYPES``.
+_DEFAULT_IGNORE_TYPES = frozenset({ERROR_TYPE, MessageType.RECEIPT})
 
-# The Funnel relay self-sends this type (from == to); it is the one legitimate self-send.
-# Compared as a literal so this wake exception never depends on the installed rine SDK
-# version exporting a named constant for it.
-_FUNNEL_WEBHOOK_TYPE = "rine.v1.webhook"
+
+def ignored_inbound_types() -> frozenset[str]:
+    """Types that never wake a turn — ``RINE_IGNORE_TYPES`` overrides the default set."""
+    raw = os.getenv("RINE_IGNORE_TYPES")
+    if raw is None:
+        return _DEFAULT_IGNORE_TYPES
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
 
 
 def _sender_handle(msg: DecryptedMessage) -> str:
     """The sender's handle (falling back to the agent uuid) for keying + self-skip."""
     return msg.sender_handle or (str(msg.from_agent_id) if msg.from_agent_id else "")
-
-
-def _is_signature_failure(decrypt_error: str) -> bool:
-    """True when a ``decrypt_error`` indicates cryptographic sender-signature tampering."""
-    return _SIG_FAILURE_MARKER in decrypt_error.lower()
 
 
 def _is_funnel_webhook(msg: DecryptedMessage) -> bool:
@@ -95,7 +125,7 @@ def _is_funnel_webhook(msg: DecryptedMessage) -> bool:
     would otherwise be swallowed by the self-skip. Every OTHER self-sent type stays
     suppressed (it is the agent's own outbound echo).
     """
-    return msg.type == _FUNNEL_WEBHOOK_TYPE
+    return msg.type == MessageType.WEBHOOK
 
 
 def _hook_name(msg: DecryptedMessage) -> str | None:
@@ -150,22 +180,38 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
         )
         return
 
+    # 2b. Terminal type: drain it (journal + ack) without waking a turn, so an exchange
+    #     that has already closed cannot restart itself.
+    if msg.type in ignored_inbound_types():
+        logger.info(
+            "rine wake: message %s is a %s; draining without waking a turn",
+            message_id,
+            msg.type,
+        )
+        _safe_journal(adapter, message_id)
+        await _ack(adapter, message_id)
+        return
+
     if msg.decrypt_error:
         # 3/4. Never wake on an unreadable message (no trusted plaintext). DRAIN it
-        #      (journal + ack) so it cannot wedge the poll loop. A *signature failure*
-        #      (forged, or a stale/rotated sender key) is logged at WARNING — the
-        #      security-relevant audit trail — while other unreadable causes (MLS /
-        #      unsupported version) log at INFO. Ciphertext is NEVER surfaced either way.
-        #      NB: an earlier design left signature failures ``new`` for an "operator
+        #      (journal + ack) so it cannot wedge the poll loop. A *refused sender*
+        #      (forged signature, or one belonging to another agent) is logged at
+        #      WARNING — the security-relevant audit trail — while other unreadable
+        #      causes (malformed / unsupported version) log at INFO. Ciphertext is NEVER
+        #      surfaced either way. The two are told apart by the SDK's own
+        #      ``is_authenticity_failure`` rather than by the error prose, so the audit
+        #      trail stays honest when the SDK rewords a message and a verdict added to
+        #      ``VerificationStatus`` is classified the day it ships.
+        #      NB: an earlier design left refused senders ``new`` for an "operator
         #      sweep", but a real inbox with an unverifiable backlog re-quarantines them
         #      every poll forever (a log/IO storm); draining + a loud WARNING is the
         #      correct, contained policy. The message is never dispatched, so this in no
         #      way weakens the "never wake on an untrusted message" invariant.
-        if _is_signature_failure(msg.decrypt_error):
+        if is_authenticity_failure(msg.verification_status):
             logger.warning(
-                "rine wake: message %s failed sender-signature verification; "
-                "not dispatching, draining (journal + ack)",
+                "rine wake: message %s refused (%s); not dispatching, draining (journal + ack)",
                 message_id,
+                msg.verification_status,
             )
         else:
             logger.info(
@@ -193,20 +239,28 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
     # 7. In-flight: a prior poll already scheduled this id's turn (the poll interval can be
     #    shorter than a turn, so the server still shows it ``new``). Skip — no double-wake,
     #    no re-ack: the in-flight turn's post-delivery callback will journal + ack it.
-    if message_id in adapter.inflight:
+    if message_id in adapter.turns:
         logger.debug("rine wake: message %s already in-flight; skipping", message_id)
         return
 
     # 8. Build the event and schedule the turn; journal + ack only AFTER it completes.
     is_group = bool(msg.group_handle or msg.group_id)
     chat_id = (msg.group_handle or str(msg.group_id)) if is_group else sender
-    # Stash the inbound id for a DM so the agent's reply turn (which calls
-    # ``adapter.send(chat_id, …)`` with no explicit reply_to) replies IN-PLACE
-    # instead of forking a new conversation. Keyed by chat_id (= sender for a DM),
-    # exactly what ``send`` receives. Group replies stay as broadcasts. REQ-FORK-01.
-    if not is_group:
-        adapter.record_reply_to(chat_id, message_id)
-    body = render_message_body(msg)
+    frame_is_x402 = is_x402(msg)
+
+    # 8x. Opt-in gateway auto-pay (RINE_X402_AUTO_PAY, default OFF): settle a sub-threshold
+    #     payment_required here WITHOUT a turn, then drain like a consumed frame. Any
+    #     refusal (above threshold, no policy/wallet, caps, send failure) returns False and
+    #     falls through to a normal payment-aware wake so a human/LLM decides.
+    if frame_is_x402 and await maybe_auto_pay(adapter.client, msg):
+        logger.info("rine wake: message %s auto-paid (x402); draining", message_id)
+        _safe_journal(adapter, message_id)
+        await _ack(adapter, message_id)
+        return
+
+    # One wake carries exactly one message, so this is a single-message render: a
+    # fresh refusal explains a missing sender key in full rather than marking it.
+    body = x402_wake_body(msg) if frame_is_x402 else render_message_body(msg, SenderKeyRefusal())
     if msg.verification_status == "unverifiable":
         body = f"[unverified sender] {body}"
     hook_name = _hook_name(msg)
@@ -220,55 +274,44 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
 
         Runs only after the agent turn completes durably (Hermes fires it post-turn).
         A journal write failure degrades that single message to at-least-once (logged
-        WARNING) without aborting anything; the ack is already best-effort. The
-        in-flight mark is always cleared. Never raises out of the callback.
+        WARNING) without aborting anything; the ack is already best-effort. The turn is
+        always closed, releasing the wake guard, the remembered inbound type and any x402
+        prose suppression (so a later unrelated send to this chat is never swallowed).
+        Never raises out.
         """
         try:
             _safe_journal(adapter, message_id)
             await _ack(adapter, message_id)
         finally:
-            adapter.inflight.discard(message_id)
+            adapter.turns.end(message_id)
 
     session_key = _session_key_for(adapter, source)
     adapter.register_post_delivery_callback(session_key, on_complete)
-    adapter.inflight.add(message_id)
+
+    # Open the turn: its chat marks this chat as already answering (so the gateway's
+    # interim narration stays inside Hermes while a cron delivery to another peer still
+    # goes out), its type lets the routed reply mirror the message, and an x402 frame
+    # additionally suppresses the turn's prose entirely — the pay/fulfill tools thread
+    # the signed payload / receipt in-place themselves. Closed post-turn.
+    # It opens HERE, immediately before the schedule, because ``end`` is only reachable
+    # from the post-delivery callback and from the except below: a raise anywhere between
+    # ``begin`` and the try would leave an entry that nothing ever removes, and an entry
+    # that outlives its turn permanently blocks that id's wake guard and drops the chat's
+    # unmarked outbound sends for the life of the process.
+    adapter.turns.begin(
+        message_id,
+        InboundTurn(chat_id=chat_id, message_type=msg.type, x402=frame_is_x402),
+    )
     try:
         await adapter.handle_message(event)
-    except Exception:  # noqa: BLE001 — scheduling failed: drop the mark, leave re-eligible
-        adapter.inflight.discard(message_id)
+    except Exception:  # noqa: BLE001 — scheduling failed: close the turn, leave re-eligible
+        adapter.turns.end(message_id)
         adapter.pop_post_delivery_callback(session_key)
         logger.error(
             "rine wake: handle_message failed for %s; leaving re-eligible",
             message_id,
             exc_info=True,
         )
-
-
-async def drain_poison_pill(adapter: RineAdapter, message_id: str, reason: str) -> None:
-    """Handle a message that ``read()`` could not decrypt (an SSE-path poison pill).
-
-    On the poll path the SDK swallows decrypt failures into ``decrypt_error`` so they
-    flow through ``_dispatch``; on the SSE path ``read()`` *raises* instead. This mirrors
-    ``_dispatch``'s decrypt_error policy for the raising case so one bad message can never
-    wedge the stream — **never surfacing ciphertext** (only the fixed error text is used).
-    Either way the message is drained (journal + ack) so it can't replay forever; a
-    signature failure logs at WARNING (security-relevant), other causes at INFO. It is
-    never dispatched.
-    """
-    if _is_signature_failure(reason):
-        logger.warning(
-            "rine wake: message %s failed sender-signature verification; "
-            "not dispatching, draining (journal + ack)",
-            message_id,
-        )
-    else:
-        logger.info(
-            "rine wake: message %s unreadable (%s); not dispatching, draining",
-            message_id,
-            reason,
-        )
-    _safe_journal(adapter, message_id)
-    await _ack(adapter, message_id)
 
 
 def _safe_journal(adapter: RineAdapter, message_id: str) -> None:
@@ -327,4 +370,4 @@ async def _poll_loop(adapter: RineAdapter) -> None:
         await asyncio.sleep(adapter.poll_interval)
 
 
-__all__ = ["_dispatch", "_poll_loop", "drain_poison_pill"]
+__all__ = ["_dispatch", "_poll_loop", "ignored_inbound_types"]

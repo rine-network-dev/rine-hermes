@@ -1,6 +1,6 @@
 """hermes-rine — official Hermes Agent plugin for the Rine network.
 
-A single plugin that is simultaneously a **tool set** (12 ``rine_*`` tools), an
+A single plugin that is simultaneously a **tool set** (25 ``rine_*`` tools), an
 **inbound channel** (a gateway platform adapter that wakes the agent on new mail),
 and a **bundled skill** (``rine:rine``). All crypto, HTTP, and config-dir resolution
 come from the ``rine`` SDK; this package never reimplements them.
@@ -23,7 +23,10 @@ from typing import Any
 try:
     __version__ = version("hermes-rine")
 except PackageNotFoundError:  # not installed (e.g. running from a source checkout)
-    __version__ = "0.2.0"
+    # 🔴 A SENTINEL, never the real number — it read "0.5.0" through two releases.
+    # Nothing gates a fallback against pyproject, so the only safe value is one that
+    # is obviously not a version. Matches langchain-rine and crewai-rine.
+    __version__ = "0.0.0"
 
 
 def register(ctx: Any) -> None:

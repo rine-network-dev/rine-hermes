@@ -42,6 +42,10 @@ OTHER_AGENT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 GROUP_ID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 MESSAGE_ID = "cccccccc-dddd-eeee-ffff-000000000001"
 CONVERSATION_ID = "cccccccc-dddd-eeee-ffff-000000000002"
+# A GROUP's running thread, which is a different object from the 1:1
+# CONVERSATION_ID above: the group one is what GroupRead.conversation_id
+# carries and what rine_thread is handed to read a group's backlog.
+GROUP_CONVERSATION_ID = "cccccccc-dddd-eeee-ffff-000000000003"
 REPLY_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 
 ORG_ID = "eeeeeeee-ffff-0000-1111-222222222222"
@@ -59,6 +63,17 @@ AGENT_PAYLOAD = {
     "incoming_policy": "accept_all",
     "outgoing_policy": "send_all",
     "created_at": "2024-01-01T00:00:00Z",
+}
+
+# A SECOND active agent in the same org — the condition the acting-agent
+# parameter exists for, and the one under which the SDK refuses to guess which
+# agent a call acts or reads as. Shared, because two suites now need it.
+SECOND_AGENT_ID = "11111111-2222-3333-4444-555555555555"
+SECOND_AGENT_PAYLOAD = {
+    **AGENT_PAYLOAD,
+    "id": SECOND_AGENT_ID,
+    "name": "second-agent",
+    "handle": "second-agent@myorg.rine.network",
 }
 
 ORG_PAYLOAD = {
@@ -101,6 +116,11 @@ def _install_gateway_stub() -> None:
     class MessageType(Enum):
         TEXT = "text"
 
+    class ProcessingOutcome(Enum):
+        SUCCESS = "success"
+        FAILURE = "failure"
+        CANCELLED = "cancelled"
+
     class MessageEvent:
         def __init__(self, **kwargs: object) -> None:
             self.__dict__.update(kwargs)
@@ -118,18 +138,54 @@ def _install_gateway_stub() -> None:
             self.error = error
 
     class BasePlatformAdapter:
-        """Minimal abstract base mirroring the surface the adapter relies on."""
+        """Minimal abstract base mirroring the surface the adapter relies on.
+
+        The post-delivery callback store reproduces the pinned host's *generation*
+        semantics verbatim (base.py ``register_post_delivery_callback`` /
+        ``pop_post_delivery_callback``): a registration without a generation is stored
+        bare, one with a generation is stored as a ``(generation, callback)`` tuple, and
+        a pop that supplies a generation returns None for a bare entry and for a tuple
+        whose generation differs. That asymmetry is what ``RineAdapter`` overrides the
+        pop for, so a double that ignored it would hide the very defect under test.
+        """
 
         def __init__(self, config: object, platform: object) -> None:
             self.config = config
             self.platform = platform
             self._running = False
+            self._post_delivery_callbacks: dict[str, object] = {}
 
         def build_source(self, **kwargs: object) -> dict[str, object]:
             return dict(kwargs)
 
         async def handle_message(self, event: object) -> None:  # pragma: no cover
             return None
+
+        def register_post_delivery_callback(
+            self, session_key: str, callback: object, *, generation: int | None = None
+        ) -> None:
+            if not session_key or not callable(callback):
+                return
+            self._post_delivery_callbacks[session_key] = (
+                callback if generation is None else (int(generation), callback)
+            )
+
+        def pop_post_delivery_callback(
+            self, session_key: str, *, generation: int | None = None
+        ) -> object | None:
+            entry = self._post_delivery_callbacks.get(session_key)
+            if entry is None:
+                return None
+            if isinstance(entry, tuple):
+                entry_generation, callback = entry
+                if generation is not None and int(entry_generation) != int(generation):
+                    return None
+                self._post_delivery_callbacks.pop(session_key, None)
+                return callback if callable(callback) else None
+            if generation is not None:
+                return None
+            self._post_delivery_callbacks.pop(session_key, None)
+            return entry
 
     def build_session_key(
         source: object,
@@ -148,6 +204,7 @@ def _install_gateway_stub() -> None:
         return f"agent:main:rine:{chat_type}:{chat_id}"
 
     base.MessageType = MessageType  # type: ignore[attr-defined]
+    base.ProcessingOutcome = ProcessingOutcome  # type: ignore[attr-defined]
     base.MessageEvent = MessageEvent  # type: ignore[attr-defined]
     base.SendResult = SendResult  # type: ignore[attr-defined]
     base.BasePlatformAdapter = BasePlatformAdapter  # type: ignore[attr-defined]
@@ -223,6 +280,38 @@ _install_registry_stub()
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_acting_agent(monkeypatch):
+    """Keep the developer's own ``RINE_AGENT`` out of every test in this package.
+
+    The SDK client constructor reads it (rung 3 of the ladder), so a machine
+    that exports one would silently give every tool call an actor the test never
+    asked for. A test that wants the env rung sets it itself, after this ran.
+    """
+    monkeypatch.delenv("RINE_AGENT", raising=False)
+
+
+def registered_tool_id(handler: Any) -> str:
+    """The tool id Hermes actually registers ``handler`` under.
+
+    🔴 Derivation, not a retyped literal. A refusal that names a verb is an
+    instruction a model follows, so the id in the sentence and the id in
+    ``_HANDLERS`` must be the same string — and only deriving one from the other
+    catches the id drifting AWAY from the constant. The cross-package pin in
+    ``tests/helpers_client_paths.py`` compares the five constants to each other
+    and cannot see that drift at all.
+
+    Imported lazily: this module installs the gateway/registry stubs Hermes
+    imports through, and they have to be in place first.
+    """
+    from hermes_rine.tools import _HANDLERS
+
+    for name, (registered, _env) in _HANDLERS.items():
+        if registered is handler:
+            return name
+    raise AssertionError(f"{handler!r} is registered under no tool id")
+
+
 @pytest.fixture
 def config_dir(tmp_path) -> str:
     """A config dir with valid credentials + the caller agent's keys on disk.
@@ -267,11 +356,35 @@ def self_keys_json(config_dir: str, agent_id: str = AGENT_ID) -> dict[str, Any]:
 
 def hpke_self_encrypt(config_dir: str, payload: dict[str, Any]) -> str:
     """HPKE-encrypt ``payload`` from AGENT_ID to AGENT_ID (self-readable ciphertext)."""
+    from rine._crypto.dm_envelope import RecipientKeys
     from rine._crypto.keys import load_agent_keys
     from rine._crypto.message import encrypt_message
 
-    own_pk = load_agent_keys(config_dir, AGENT_ID).encryption.public_key
-    return encrypt_message(config_dir, AGENT_ID, own_pk, payload).encrypted_payload
+    # Classical on purpose: the recipient's ML-KEM half is left out so this helper
+    # keeps producing `hpke-v1`, which is what the fixtures around it declare.
+    own = load_agent_keys(config_dir, AGENT_ID)
+    recipient = RecipientKeys(encryption=own.encryption.public_key)
+    return encrypt_message(config_dir, AGENT_ID, recipient, payload).encrypted_payload
+
+
+def hpke_peer_encrypt(config_dir: str, payload: dict[str, Any]) -> str:
+    """HPKE-encrypt ``payload`` from OTHER_AGENT_ID to AGENT_ID, signed by the peer.
+
+    A row the server reports as coming from another agent is signed by that agent's
+    own key, so a fixture standing in for a received turn is sealed with the peer's
+    keys — sealing it with the caller's own key would attribute a signature to an
+    agent that did not make it. Needs the ``other_keys`` fixture (peer keys on disk)
+    and ``mock_recipient_keys`` (the peer's published signing key).
+    """
+    from rine._crypto.dm_envelope import RecipientKeys
+    from rine._crypto.keys import load_agent_keys
+    from rine._crypto.message import encrypt_message
+
+    # Classical on purpose, matching ``hpke_self_encrypt``: no ML-KEM half, so the
+    # ciphertext stays `hpke-v1` as the fixtures around it declare.
+    own = load_agent_keys(config_dir, AGENT_ID)
+    recipient = RecipientKeys(encryption=own.encryption.public_key)
+    return encrypt_message(config_dir, OTHER_AGENT_ID, recipient, payload).encrypted_payload
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +407,29 @@ def mock_agents() -> None:
 
     respx.get(f"{API_URL}/agents").mock(
         return_value=httpx.Response(200, json={"items": [AGENT_PAYLOAD]})
+    )
+
+
+def mock_group_row(group_id: str = GROUP_ID, **payload: Any) -> None:
+    """Stub ``GET /groups/{id}`` — the one indexed read a group reference costs.
+
+    A reference is resolved before it becomes a URL, and a UUID is
+    checked against its own row rather than against a listing. Every verb that
+    takes a group therefore pays this read once, whatever spelling it was given.
+    """
+    import respx
+
+    respx.get(f"{API_URL}/groups/{group_id}").mock(
+        return_value=httpx.Response(200, json=group_payload(group_id=group_id, **payload))
+    )
+
+
+def mock_two_agents() -> None:
+    """Stub ``GET /agents`` with a two-agent org (auto-resolution is refused)."""
+    import respx
+
+    respx.get(f"{API_URL}/agents").mock(
+        return_value=httpx.Response(200, json={"items": [AGENT_PAYLOAD, SECOND_AGENT_PAYLOAD]})
     )
 
 
@@ -331,6 +467,38 @@ def mock_self_keys(config_dir: str) -> None:
     )
 
 
+def mock_group_mls_init(group_id: str = GROUP_ID) -> Any:
+    """Stub the MLS-founding calls a group create fires after ``POST /groups``.
+
+    ``client.groups.create`` now founds post-quantum MLS state: it opens the init
+    window (``mls/init``) and publishes the founder's init commit (``mls/commit``).
+    The founder is the only member here, so no KeyPackage claims occur.
+
+    It then **re-reads the group**: the server latches ``mls_group_id`` after the
+    create response was minted, so without this ``GET`` a brand-new MLS group
+    renders as sender-key. The re-read is guarded in the SDK, so leaving it
+    unmocked would not fail a test — it would silently return the unlatched
+    create response, which is how a create test passes for the wrong reason.
+
+    Returns the ``mls/init`` route so a caller can assert the founder opened the
+    init window.
+    """
+    import respx
+
+    init = respx.post(f"{API_URL}/groups/{group_id}/mls/init").mock(
+        return_value=httpx.Response(200, json={"members": []})
+    )
+    respx.post(f"{API_URL}/groups/{group_id}/mls/commit").mock(
+        return_value=httpx.Response(200, json={"epoch": 1})
+    )
+    respx.get(f"{API_URL}/groups/{group_id}").mock(
+        return_value=httpx.Response(
+            200, json=group_payload(group_id=group_id, mls_enabled=True, mls_group_id="mls-xyz")
+        )
+    )
+    return init
+
+
 # ---------------------------------------------------------------------------
 # Server-message + group payload builders.
 # ---------------------------------------------------------------------------
@@ -346,8 +514,15 @@ def message_payload(
     msg_type: str = "rine.v1.task_request",
     group_id: str | None = None,
     group_handle: str | None = None,
+    direction: str | None = None,
+    self_encrypted_payload: str | None = None,
 ) -> dict[str, Any]:
-    """Build a server message payload dict (what ``/messages/{id}`` returns)."""
+    """Build a server message payload dict (what ``/messages/{id}`` returns).
+
+    ``direction``/``self_encrypted_payload`` mirror the server's sender view: only
+    when the caller IS the sender does the row come back ``direction="sent"`` with
+    the sender's self-seal, which is the only copy of its own send it can reopen.
+    """
     payload: dict[str, Any] = {
         "id": msg_id,
         "conversation_id": CONVERSATION_ID,
@@ -363,6 +538,10 @@ def message_payload(
         payload["group_id"] = group_id
     if group_handle is not None:
         payload["group_handle"] = group_handle
+    if direction is not None:
+        payload["direction"] = direction
+    if self_encrypted_payload is not None:
+        payload["self_encrypted_payload"] = self_encrypted_payload
     return payload
 
 
@@ -383,30 +562,76 @@ def sent_message_payload(
     }
 
 
+def member_payload(
+    agent_id: str, handle: str, *, role: str = "member", is_own_org: bool = True
+) -> dict[str, Any]:
+    """A ``GroupMember`` payload (server ``/groups/{id}/members`` item shape).
+
+    ``is_own_org`` defaults to ``True`` because that is what most of these rows
+    are: the roster of a group this agent's org is in. A test that wants another
+    org's seat says so, which is the only way that row is ever interesting.
+
+    It lives here rather than beside the roster tests because the roster is no
+    longer the only reader of it: ``rine_group_remove`` resolves the handle it
+    was given against the same rows, so both suites have to agree on the shape.
+    """
+    return {
+        "id": "dddddddd-0000-1111-2222-333333333333",
+        "group_id": GROUP_ID,
+        "agent_id": agent_id,
+        "role": role,
+        "joined_at": "2024-03-04T05:06:07Z",
+        "agent_handle": handle,
+        "is_own_org": is_own_org,
+    }
+
+
 def group_payload(
     *,
     name: str = "ops",
     handle: str = GROUP_HANDLE,
     group_id: str = GROUP_ID,
     member_count: int = 2,
+    enrollment_policy: str = "closed",
     mls_enabled: bool = False,
     mls_group_id: str | None = None,
     mls_pending: bool = False,
     description: str | None = None,
+    conversation_id: str | None = None,
+    member_agent_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """A ``GroupRead`` payload (server ``/groups`` item shape)."""
+    """A ``GroupRead`` payload (server ``/groups`` item shape).
+
+    ``conversation_id`` defaults to ``None`` and the key is always emitted,
+    which is the server's own shape: it is nullable because a group's
+    conversation is created lazily on its first post, and a group nobody has
+    posted in therefore has none.
+
+    ``member_agent_ids`` defaults to **empty**, and the key is likewise always
+    emitted. Empty is the server's honest answer for a group the org is in but
+    no agent of it is seated in, and defaulting it that way keeps every test
+    that does not care about seats from quietly asserting one.
+
+    ``enrollment_policy`` is an argument because the default pair here —
+    ``closed`` with ``mls_enabled=False`` — is a row no shipped client creates:
+    every create sends ``mls_enabled=True`` and the server column defaults true.
+    A group that really runs sender keys is ``open``, and without this the
+    sender-key arm of every verb was only ever driven on the unreachable row.
+    """
     return {
         "id": group_id,
         "name": name,
         "handle": handle,
         "description": description,
-        "enrollment_policy": "closed",
+        "enrollment_policy": enrollment_policy,
         "visibility": "private",
         "member_count": member_count,
         "created_at": "2024-01-01T00:00:00Z",
         "mls_enabled": mls_enabled,
         "mls_group_id": mls_group_id,
         "mls_pending": mls_pending,
+        "conversation_id": conversation_id,
+        "member_agent_ids": member_agent_ids or [],
     }
 
 
@@ -490,20 +715,15 @@ class FakeAdapter:
         self.poll_interval = 0
         self.running = True
         self.config = _FakeConfig()
-        self.inflight: set[str] = set()
         self.events: list[object] = []
         # session_key -> registered (possibly chained) post-delivery callback.
         self._post_delivery_callbacks: dict[str, object] = {}
         self._raise_on_handle = bool(opts.get("raise_on_handle", False))
-        # Mirror the real adapter's reply-in-place stash (REQ-FORK-01): _dispatch
-        # records the inbound id per DM chat_id so the reply turn replies in-place.
-        from hermes_rine._replystash import ReplyStash
+        # The REAL in-flight turn registry — it is plain state with no Hermes seam in it,
+        # so a double would only be a second implementation to keep in step.
+        from hermes_rine._turns import InboundTurns
 
-        self._reply_stash = ReplyStash()
-
-    def record_reply_to(self, chat_id: str, message_id: str) -> None:
-        """Stash the latest inbound DM id (mirrors ``RineAdapter.record_reply_to``)."""
-        self._reply_stash.record(chat_id, message_id)
+        self.turns = InboundTurns()
 
     def build_source(self, **kwargs: object) -> object:
         """Return a real ``SessionSource`` under real Hermes (the rig), else a dict double.
@@ -528,8 +748,15 @@ class FakeAdapter:
             user_name=kwargs.get("user_name"),  # type: ignore[arg-type]
         )
 
-    def register_post_delivery_callback(self, session_key: str, callback: object) -> None:
-        """Chain callbacks for the same key (mirrors base.py one-shot chaining semantics)."""
+    def register_post_delivery_callback(
+        self, session_key: str, callback: object, *, generation: int | None = None
+    ) -> None:
+        """Chain callbacks for the same key (mirrors base.py one-shot chaining semantics).
+
+        ``generation`` is accepted and ignored: what the gateway's generation gate does to
+        a bare registration is a property of ``RineAdapter.pop_post_delivery_callback``,
+        exercised against the real adapter and the faithful base double, not here.
+        """
         if not session_key or not callable(callback):
             return
         existing = self._post_delivery_callbacks.get(session_key)
@@ -545,7 +772,9 @@ class FakeAdapter:
             callback = _chained
         self._post_delivery_callbacks[session_key] = callback
 
-    def pop_post_delivery_callback(self, session_key: str) -> object | None:
+    def pop_post_delivery_callback(
+        self, session_key: str, *, generation: int | None = None
+    ) -> object | None:
         """One-shot pop of a registered callback for ``session_key`` (or None)."""
         return self._post_delivery_callbacks.pop(session_key, None)
 
@@ -601,6 +830,7 @@ def make_message():
         verification_status: str = "verified",
         verified: bool = True,
         decrypt_error: str | None = None,
+        decrypt_error_code: str | None = None,
         group_handle: str | None = None,
         msg_type: str = "rine.v1.task_request",
         metadata: dict[str, Any] | None = None,
@@ -618,6 +848,7 @@ def make_message():
             verified=verified,
             verification_status=verification_status,  # type: ignore[arg-type]
             decrypt_error=decrypt_error,
+            decrypt_error_code=decrypt_error_code,
         )
 
     return _make

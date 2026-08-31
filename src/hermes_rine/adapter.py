@@ -6,7 +6,7 @@ rine message into a ``MessageEvent`` and ``await``s ``self.handle_message`` to w
 gateway agent; the agent's reply routes back out through ``send()`` as a rine send.
 Exactly-once across restarts via the durable ``ConsumedJournal`` (record-before-ack).
 
-Every uncertain Hermes signature is isolated here (R1/R11). The ``Platform`` arg is
+Every uncertain Hermes signature is isolated here. The ``Platform`` arg is
 ``Platform("rine")`` — a string pseudo-member the enum's ``_missing_`` mints for a
 runtime-registered plugin platform (``platform_registry.is_registered`` is True by the
 time the gateway constructs the adapter, because ``register_platform`` ran first). The
@@ -25,30 +25,52 @@ from typing import TYPE_CHECKING, Any
 from gateway.config import Platform, PlatformConfig  # type: ignore[import-not-found]
 from gateway.platforms.base import (  # type: ignore[import-not-found]
     BasePlatformAdapter,
+    ProcessingOutcome,
     SendResult,
 )
-from rine import MessageType
 
 from hermes_rine._client import _format_error, build_client
 from hermes_rine._journal import ConsumedJournal
-from hermes_rine._replystash import ReplyStash
+from hermes_rine._outbound import notify_failure, route_reply
+from hermes_rine._turns import InboundTurns
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rine import RineClient
 
 logger = logging.getLogger("hermes_rine.adapter")
 
 _DEFAULT_POLL_INTERVAL = 30
 
+# Hermes reads an allowlist the same way but additionally honours a bare ``*`` and, for a
+# handle containing ``@``, also admits the local part before it. This parser honours ``*``
+# too, so ``RINE_ALLOWED_HANDLES=*`` means the same thing at both layers; it deliberately
+# does NOT split on ``@``, because every rine handle contains one and admitting the local
+# part alone would let ``peer@other-org`` through an allowlist naming ``peer@my-org``.
+# The gateway layer is therefore the looser of the two and this one is the tighter — that
+# asymmetry is intended, not a bug to reconcile.
+_ALLOW_ALL_HANDLES = "*"
+
 
 def _parse_allowed_handles(raw: str) -> set[str] | None:
-    """Parse ``RINE_ALLOWED_HANDLES`` into a set, or None when unset (allow all)."""
+    """Parse ``RINE_ALLOWED_HANDLES`` into a set, or None for allow-all (unset or ``*``)."""
     handles = {h.strip() for h in raw.split(",") if h.strip()}
-    return handles or None
+    if not handles or _ALLOW_ALL_HANDLES in handles:
+        return None
+    return handles
 
 
 class RineAdapter(BasePlatformAdapter):
     """Gateway adapter that wakes the agent on inbound rine mail and replies back out."""
+
+    # A rine message cannot be edited once sent: it is sealed to the recipient and
+    # POSTed, and the protocol has no update verb. Declaring that keeps the gateway's
+    # streaming consumer from previewing a partial answer it would then try to edit —
+    # with editing unavailable the gateway skips streaming and sends the finished answer
+    # once (gateway/run.py:13923-13925). Every other non-editing platform in the host
+    # declares the same flag (gateway/platforms/signal.py, wecom.py, weixin.py).
+    SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig) -> None:
         """Read wake env vars; defer the client + journal to lazy first use."""
@@ -61,15 +83,10 @@ class RineAdapter(BasePlatformAdapter):
         self._journal = ConsumedJournal()
         self._agent_handle = ""
         self._listen_task: asyncio.Task[None] | None = None
-        # In-flight ids: a turn scheduled by a prior poll but not yet completed
-        # (post-delivery callback unfired). Guards against a poll interval shorter
-        # than a turn re-dispatching the same still-``new`` message (double-wake).
-        self._inflight: set[str] = set()
-        # Latest inbound message id per DM chat_id, so the agent's reply turn replies
-        # IN-PLACE (same conversation) instead of forking via send(). Keyed by chat_id
-        # (= the DM sender handle, what `send` receives), so `send` looks it up without
-        # recomputing the session key. REQ-FORK-01.
-        self._reply_stash = ReplyStash()
+        # Turns a rine message woke that are scheduled but not finished: the wake guard
+        # (no double-dispatch while a turn runs) and the context every outbound decision
+        # reads. Opened by ``_poll._dispatch``, closed by the post-delivery callback.
+        self._turns = InboundTurns()
         logger.info("[rine] adapter initialised (transport=%s)", self._transport)
 
     # -- properties the transports read (one stable seam) ------------------------------
@@ -107,17 +124,9 @@ class RineAdapter(BasePlatformAdapter):
         return self._poll_interval
 
     @property
-    def inflight(self) -> set[str]:
-        """Ids whose turn is scheduled but not yet completed (in-flight wake guard)."""
-        return self._inflight
-
-    def record_reply_to(self, chat_id: str, message_id: str) -> None:
-        """Stash the latest inbound message id for a DM ``chat_id`` (REQ-FORK-01).
-
-        ``send`` reads this so a reply to a DM lands in the inbound conversation
-        (reply-in-place) instead of forking. Bounded; see :class:`ReplyStash`.
-        """
-        self._reply_stash.record(chat_id, message_id)
+    def turns(self) -> InboundTurns:
+        """The inbound turns currently in flight (wake guard + outbound context)."""
+        return self._turns
 
     @property
     def running(self) -> bool:
@@ -126,11 +135,23 @@ class RineAdapter(BasePlatformAdapter):
 
     # -- lifecycle ---------------------------------------------------------------------
 
-    async def connect(self) -> bool:
-        """Authenticate (cheap ``whoami``) then spawn the transport listener."""
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        """Authenticate (cheap ``whoami``) then spawn the transport listener.
+
+        ``is_reconnect`` is accepted for call-site compatibility and deliberately unused:
+        rine holds no server-side ephemeral queue that a cold boot drops. The durable
+        consumed-id journal already provides exactly-once across a reconnect, and both
+        transports are cursor-free, so a reconnect needs no distinct code path. It is
+        keyword-only with a default, so a host that calls a bare ``connect()`` still binds.
+
+        Connecting is idempotent: a host that reuses one adapter instance across
+        reconnects would otherwise leave the previous listener running, and two listeners
+        on one inbox double every wake.
+        """
         from hermes_rine._poll import _poll_loop
         from hermes_rine._sse import _sse_loop
 
+        await self._stop_listener()
         try:
             me = await self.client.whoami()
         except Exception as err:  # noqa: BLE001 — surface the reason, fail the connect
@@ -147,19 +168,47 @@ class RineAdapter(BasePlatformAdapter):
         )
         return True
 
+    async def _stop_listener(self) -> None:
+        """Cancel and await the transport listener task, if one is running."""
+        if self._listen_task is None:
+            return
+        self._listen_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._listen_task
+        self._listen_task = None
+
     async def disconnect(self) -> None:
         """Stop the listener, close the client + journal."""
         self._running = False
-        if self._listen_task is not None:
-            self._listen_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._listen_task
-            self._listen_task = None
+        await self._stop_listener()
         if self._client is not None:
             await self._client.close()
             self._client = None
         self._journal.close()
         logger.info("[rine] disconnected")
+
+    def pop_post_delivery_callback(
+        self, session_key: str, *, generation: int | None = None
+    ) -> Callable[[], Any] | None:
+        """Pop the callback that ends a turn, ignoring generation for our own entry.
+
+        Journal + ack (and the release of the in-flight turn) happen inside a
+        post-delivery callback the gateway fires once the turn is over, so a callback
+        the gateway declines to pop is a message that stays ``new`` forever.
+
+        The gateway pops with the run generation it bound to the turn and returns None
+        for any entry registered without one (``gateway/platforms/base.py``
+        ``pop_post_delivery_callback``). An adapter cannot register with a matching
+        generation: the token is minted inside the message handler, i.e. *after*
+        ``_dispatch`` has already registered and handed the turn over. So a
+        generation-free entry — which is only ever ours — is popped generation-free,
+        while an entry that carries a generation keeps the gateway's ownership check
+        that stops a stale run from clearing a fresher run's callback.
+        """
+        entry = getattr(self, "_post_delivery_callbacks", {}).get(session_key)
+        if callable(entry):
+            generation = None
+        return super().pop_post_delivery_callback(session_key, generation=generation)
 
     # -- outbound --------------------------------------------------------------------
 
@@ -170,50 +219,27 @@ class RineAdapter(BasePlatformAdapter):
         reply_to: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
-        """Route the agent's reply back to rine as a 1:1 / group send (or in-thread reply).
+        """Relay the turn's final answer to rine, in the conversation it answers.
 
-        REQ-FORK-01 — a DM with a stashed inbound id and no explicit ``reply_to`` replies
-        IN-PLACE via ``client.reply`` (same conversation) instead of ``client.send`` (which
-        forks a NEW conversation). The change is conversation-routing only: we pass an
-        explicit ``message_type=TASK_REQUEST`` so the reply keeps the prior ``send`` default
-        (``client.reply``'s SDK default is ``TASK_RESPONSE``, which is loop-guard terminal and
-        would silently stop a multi-turn peer exchange). Group sends and explicit-``reply_to``
-        callers are unchanged; ``_poll._dispatch`` records the stash per inbound DM.
-
-        A Funnel ``rine.v1.webhook`` is a self-send event (``from == to``): after the turn the
-        gateway auto-replies to the "sender", which for a webhook is THIS agent. rine forbids
-        self-sends (422 "Cannot send a message to the same agent"), and a webhook is a one-way
-        event with no one to reply to — so a self-addressed reply is skipped gracefully rather
-        than surfacing a spurious error to the agent. This is the outbound counterpart to the
-        inbound self-skip exemption in ``_poll._dispatch`` (REQ-FUNNEL self-send symmetry). The
-        agent's real actions — sends to peers or groups — are unaffected.
+        Every gateway send lands here — the final routed response, interim narration, and
+        Hermes' own operator notices alike — so the relay/no-relay decision and the reply's
+        message type live in ``_outbound``, next to the markers they read.
         """
-        is_group = chat_id.startswith("#")
-        if (
-            not is_group
-            and self._agent_handle
-            and chat_id.strip().lower() == self._agent_handle.strip().lower()
-        ):
-            logger.info(
-                "[rine] skipping self-addressed reply (a webhook self-send has no reply target)"
-            )
-            return SendResult(success=True)
-        # Reply-in-place for a DM with a known inbound id (no explicit reply_to, not a group).
-        stashed_reply_to = reply_to or (None if is_group else self._reply_stash.get(chat_id))
-        logger.debug("[rine] outbound to %s (reply_to=%s)", chat_id, stashed_reply_to)
-        try:
-            if stashed_reply_to:
-                msg = await self.client.reply(
-                    stashed_reply_to,
-                    {"text": content},
-                    message_type=MessageType.TASK_REQUEST,
-                )
-            else:
-                msg = await self.client.send(chat_id, {"text": content})
-        except Exception as err:  # noqa: BLE001 — never raise into the gateway send path
-            logger.error("[rine] send to %s failed: %s", chat_id, err)
-            return SendResult(success=False, error=_format_error(err))
-        return SendResult(success=True, message_id=str(msg.id))
+        return await route_reply(self, chat_id, content, reply_to, metadata)
+
+    async def on_processing_complete(self, event: Any, outcome: ProcessingOutcome) -> None:
+        """Tell the peer when a turn failed, instead of leaving it on silence.
+
+        Hermes writes its own crash text for a person in a chat window and sends it with
+        neither final-reply marker, so it is not relayed. A rine peer gets a
+        ``rine.v1.error`` in the same thread instead.
+        """
+        if outcome is not ProcessingOutcome.FAILURE:
+            return
+        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+        if not chat_id:
+            return
+        await notify_failure(self, chat_id, getattr(event, "message_id", None))
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Minimal chat descriptor — rine chat_ids are handles (``#`` prefixed for groups)."""

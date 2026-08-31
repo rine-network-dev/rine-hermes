@@ -2,10 +2,10 @@
 
 A single bad message must never tear down the live stream (the asymmetry vs poll the
 audit flagged). These tests drive ``_consume_stream`` against a fake stream client whose
-``read()`` is scripted per id: a good read dispatches + completes; a poison-pill
-``CryptoError`` is drained (journaled/acked for unsupported, quarantined for a signature
-failure) without raising; a transient error is skipped — and in every case the iterator
-keeps advancing to the following events.
+``read()`` is scripted per id: a good read dispatches + completes; an undecryptable or
+refused message comes back from ``read()`` *carrying* ``decrypt_error`` — the SDK reports
+it on the message and never raises — so it flows into ``_dispatch`` and is drained there;
+a transient HTTP error is skipped. In every case the iterator keeps advancing.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import json
 from uuid import UUID
 
 import pytest
-from rine import CryptoError, RateLimitError
+from rine import RateLimitError
 
 from hermes_rine._sse import _consume_stream
 
@@ -24,7 +24,8 @@ MSG_POISON = "22222222-2222-2222-2222-222222222222"
 MSG_AFTER = "33333333-3333-3333-3333-333333333333"
 MSG_SIG = "44444444-4444-4444-4444-444444444444"
 
-SIG_FAILURE = "Sender signature verification failed"
+UNSUPPORTED = "Unsupported encryption_version 'mls-v1'"
+SENDER_MISMATCH = "Envelope sender does not match the message sender"
 
 
 def _event(message_id: str | None, *, kind: str = "message"):
@@ -69,36 +70,40 @@ def _adapter_with_stream(make_adapter, events, reads):
     return adapter
 
 
-async def test_poison_pill_unsupported_is_drained_not_stream_torn_down(make_adapter, make_message):
+async def test_undecryptable_message_is_drained_not_stream_torn_down(make_adapter, make_message):
+    # ``read()`` reports an unreadable row on the message rather than raising, so the SSE
+    # path shares the poll path's drain policy verbatim through ``_dispatch``.
+    unreadable = make_message(
+        message_id=UUID(MSG_POISON), plaintext=None, decrypt_error=UNSUPPORTED
+    )
     good = make_message(message_id=UUID(MSG_GOOD))
     after = make_message(message_id=UUID(MSG_AFTER))
     adapter = _adapter_with_stream(
         make_adapter,
         [_event(MSG_POISON), _event(MSG_GOOD), _event(MSG_AFTER)],
-        {
-            MSG_POISON: CryptoError("HPKE decryption failed — unsupported"),
-            MSG_GOOD: good,
-            MSG_AFTER: after,
-        },
+        {MSG_POISON: unreadable, MSG_GOOD: good, MSG_AFTER: after},
     )
     await _consume_stream(adapter)
-    # The poison pill did NOT tear down the stream — both later messages were read.
+    # The unreadable message did NOT tear down the stream — both later messages were read.
     assert adapter.client.read_attempts == [MSG_POISON, MSG_GOOD, MSG_AFTER]
-    # The poison pill drained via journal + ack (it was not a signature failure).
+    # It drained via journal + ack, so it cannot replay on every reconnect.
     assert adapter.journal.is_consumed("me", MSG_POISON) is True
     assert MSG_POISON in adapter.client.acked
-    # Good messages each scheduled a turn (callbacks pending).
+    # Good messages each scheduled a turn (callbacks pending); the bad one never did.
     assert len(adapter.events) == 2
 
 
-async def test_signature_failure_poison_pill_never_dispatched_but_drained(make_adapter):
-    adapter = _adapter_with_stream(
-        make_adapter,
-        [_event(MSG_SIG)],
-        {MSG_SIG: CryptoError(SIG_FAILURE)},
+async def test_refused_sender_never_dispatched_but_drained(make_adapter, make_message):
+    refused = make_message(
+        message_id=UUID(MSG_SIG),
+        plaintext=None,
+        decrypt_error=SENDER_MISMATCH,
+        verification_status="sender-mismatch",
+        verified=False,
     )
+    adapter = _adapter_with_stream(make_adapter, [_event(MSG_SIG)], {MSG_SIG: refused})
     await _consume_stream(adapter)
-    # Signature failure: NEVER dispatched (security), but DRAINED (journaled + acked, with a
+    # A refused sender: NEVER dispatched (security), but DRAINED (journaled + acked, with a
     # WARNING) so it can't replay every reconnect; the stream stays intact.
     assert adapter.events == []
     assert adapter.journal.is_consumed("me", MSG_SIG) is True
@@ -113,7 +118,9 @@ async def test_transient_read_error_skips_message_keeps_stream(make_adapter, mak
         {MSG_POISON: RateLimitError("rate limited"), MSG_AFTER: after},
     )
     await _consume_stream(adapter)
-    # Transient error skipped (not journaled, not acked) but the stream kept going.
+    # Transient error skipped (not journaled, not acked) but the stream kept going. It is
+    # left ``new`` on purpose: a 429/5xx says nothing about the message, so the next
+    # reconnect must be able to try it again.
     assert adapter.client.read_attempts == [MSG_POISON, MSG_AFTER]
     assert adapter.journal.is_consumed("me", MSG_POISON) is False
     assert len(adapter.events) == 1  # the later good message still dispatched
@@ -127,3 +134,18 @@ async def test_cancelled_error_propagates_out_of_consume(make_adapter):
     )
     with pytest.raises(asyncio.CancelledError):
         await _consume_stream(adapter)  # disconnect() must still unwind
+
+
+async def test_x402_frame_wakes_payment_aware_via_sse(make_adapter, make_message):
+    # The un-drain must hold on the SSE path too (it shares ``_dispatch``). An
+    # x402 quote arriving over the stream wakes the agent payment-aware, not drained.
+    quote = make_message(
+        message_id=UUID(MSG_GOOD),
+        msg_type="rine.v1.x402_payment_required",
+        plaintext='{"x402Version":2,"accepts":[]}',
+    )
+    adapter = _adapter_with_stream(make_adapter, [_event(MSG_GOOD)], {MSG_GOOD: quote})
+    await _consume_stream(adapter)
+    assert len(adapter.events) == 1  # payment-aware wake, not a silent drain
+    assert "x402" in adapter.events[0].text
+    assert adapter.journal.is_consumed("me", MSG_GOOD) is False  # deferred to the turn

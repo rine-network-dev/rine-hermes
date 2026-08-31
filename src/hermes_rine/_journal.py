@@ -1,4 +1,7 @@
-"""Durable sqlite consumed-id journal for exactly-once inbound wake (D-WAKE).
+"""Durable sqlite journal of consumed ids: the inbound wake fires exactly once per message.
+
+Exactly-once is required to hold **across a gateway restart**, not merely within one run —
+which is why the record is durable rather than an in-process set.
 
 A tiny ``(agent, message_id)`` table that survives a gateway restart, so a rine
 message that was already woken-and-recorded is never dispatched a second time. The

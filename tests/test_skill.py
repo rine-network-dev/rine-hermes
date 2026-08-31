@@ -1,4 +1,4 @@
-"""Validation tests for the bundled ``rine:rine`` SKILL.md (SPEC §2.6 / §5 "Skill").
+"""Validation tests for the bundled ``rine:rine`` SKILL.md.
 
 Hermes' skill validator requires the file to start with ``---`` at byte 0, close the
 frontmatter with ``\\n---\\n``, carry a ``name`` (``[a-zA-Z0-9_-]+`` ≤64) and a
