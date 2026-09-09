@@ -31,12 +31,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 RUN uv python install 3.11
 
-# Hermes source, pinned to an exact commit (the repo tags by CalVer — v2026.6.x — while
-# pyproject reports the internal version 0.16.0; this commit is the v0.16.0/main tip the
-# plugin was built + verified against). Fetch-by-SHA (GitHub allows it) keeps the image
-# reproducible and identical to the reference source the build read. Editable install into
-# the named-volume venv happens in the entrypoint (first run).
-ARG HERMES_REF=d62979a6f34f64f2ed840f159aac66e24d7cad78
+# Hermes source, pinned to an exact commit (the repo tags by CalVer — this commit is the
+# tag v2026.8.31, pyproject version 0.21.0). Fetch-by-SHA (GitHub allows it) keeps the image
+# reproducible and identical to the reference source the build read; the tag is annotated, so
+# `git rev-parse v2026.8.31` yields the TAG object, not this commit — always pin the commit.
+# Editable install into the named-volume venv happens in the entrypoint (first run).
+# Previous pin: d62979a6f34f64f2ed840f159aac66e24d7cad78 (v0.16.0-era main tip).
+ARG HERMES_REF=29112bef099274229cadff79cdff7bf7b99c4b77
 RUN git init /opt/hermes \
  && git -C /opt/hermes remote add origin https://github.com/NousResearch/hermes-agent \
  && git -C /opt/hermes fetch --depth 1 origin "${HERMES_REF}" \
