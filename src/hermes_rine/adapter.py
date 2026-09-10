@@ -30,6 +30,14 @@ from gateway.platforms.base import (  # type: ignore[import-not-found]
 )
 
 from hermes_rine._client import _format_error, build_client
+from hermes_rine._gateway_control import (
+    ALLOW_ENV,
+    HANDLES_ENV,
+    grants_control,
+    log_configuration,
+    parse_control_handles,
+    switch_on,
+)
 from hermes_rine._journal import ConsumedJournal
 from hermes_rine._outbound import notify_failure, route_reply
 from hermes_rine._turns import InboundTurns
@@ -68,8 +76,12 @@ class RineAdapter(BasePlatformAdapter):
     # POSTed, and the protocol has no update verb. Declaring that keeps the gateway's
     # streaming consumer from previewing a partial answer it would then try to edit —
     # with editing unavailable the gateway skips streaming and sends the finished answer
-    # once (gateway/run.py:13923-13925). Every other non-editing platform in the host
-    # declares the same flag (gateway/platforms/signal.py, wecom.py, weixin.py).
+    # once. The consumer that reads it is ``_build_stream_consumer_config``, via its own
+    # ``_adapter_supports_edit = getattr(adapter, "SUPPORTS_MESSAGE_EDITING", True)``
+    # (named as bare symbols: the module they live in was moved by an upstream
+    # decomposition release, and a path here would rot again). Every other non-editing
+    # platform in the host declares the same flag (gateway/platforms/signal.py,
+    # gateway/platforms/weixin.py, plugins/platforms/wecom/adapter.py).
     SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig) -> None:
@@ -79,6 +91,11 @@ class RineAdapter(BasePlatformAdapter):
         self._poll_interval = int(os.getenv("RINE_POLL_INTERVAL", str(_DEFAULT_POLL_INTERVAL)))
         self._allowed_handles = _parse_allowed_handles(os.getenv("RINE_ALLOWED_HANDLES", ""))
         self._require_verified = os.getenv("RINE_REQUIRE_VERIFIED") == "1"
+        # Gateway control: read once here, decided per message by
+        # ``allows_gateway_control``. Both default to "nobody" — see
+        # :mod:`hermes_rine._gateway_control` for the full truth table.
+        self._gateway_control_on = switch_on(os.getenv(ALLOW_ENV))
+        self._gateway_control_handles = parse_control_handles(os.getenv(HANDLES_ENV, ""))
         self._client: RineClient | None = None
         self._journal = ConsumedJournal()
         self._agent_handle = ""
@@ -133,6 +150,22 @@ class RineAdapter(BasePlatformAdapter):
         """True while the listener should keep running (mirrors base ``_running``)."""
         return self._running
 
+    def allows_gateway_control(self, sender: str) -> bool:
+        """Whether ``sender``'s message may resolve gateway commands and control prompts.
+
+        Read-only and I/O-free: both settings were parsed once in ``__init__``, so the
+        per-message decision costs a set lookup. Off for every sender unless the channel
+        switch is on AND the sender is named. The wake allowlist has already run by the
+        time this is asked, so the answer is a subset of the admitted senders — but that
+        allowlist is allow-all when ``RINE_ALLOWED_HANDLES`` is unset, so it is a bound
+        only when the operator set it. ``connect`` says which of the two it is.
+        """
+        return grants_control(
+            enabled=self._gateway_control_on,
+            handles=self._gateway_control_handles,
+            sender=sender,
+        )
+
     # -- lifecycle ---------------------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -161,6 +194,14 @@ class RineAdapter(BasePlatformAdapter):
         live = [a.handle for a in me.agents if a.revoked_at is None]
         self._agent_handle = live[0] if live else ""
         self._running = True
+        # Say the gateway-control posture out loud here rather than per message: a knob
+        # that is half-configured is off, and a user who set one of its two halves and
+        # heard nothing would reasonably read the silence as "it worked".
+        log_configuration(
+            enabled=self._gateway_control_on,
+            handles=self._gateway_control_handles,
+            wake_allowlist_named=self._allowed_handles is not None,
+        )
         loop = _sse_loop if self._transport == "sse" else _poll_loop
         self._listen_task = asyncio.create_task(loop(self))
         logger.info(

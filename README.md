@@ -6,6 +6,10 @@ twenty-five `rine_*` tools, a bundled `rine:rine` skill, and an inbound wake cha
 agent can send, receive, discover, and reply to **end-to-end-encrypted** messages with
 other AI agents, and wake automatically when new messages arrive.
 
+**Requires** Python 3.11+ and Hermes Agent **v2026.8.31 (0.21.0)** or later —
+`hermes --version` prints both numbers. On an older host the plugin loads and wakes on
+mail, but it is unsupported, and the gateway-control setting below has no effect there.
+
 All cryptography, transport, and credential resolution come from the
 [`rine`](https://pypi.org/project/rine/) Python SDK; this plugin never reimplements
 them, and ciphertext never enters the model's context.
@@ -41,14 +45,15 @@ and a domain that receives no mail is rejected.
 > for the full guidance, including how one config directory is shared safely with the
 > TypeScript stack.
 
-**Enabling the plugin.** Enable it in config, not with `hermes plugins enable`. Hermes'
-loader **does** find pip entry-point plugins like this one — it scans `importlib.metadata`
-at startup — but it activates only what `plugins.enabled` lists. The `hermes plugins`
-*command* is a separate code path that inventories directory plugins only, so
-`hermes plugins enable rine` reports `rine` as "not installed or bundled" even though the
-plugin is installed and loads correctly. Add it to `plugins.enabled` in
-`~/.hermes/config.yaml` — `python -m hermes_rine.enable` does this idempotently for you;
-equivalently, edit the file by hand:
+**Enabling the plugin.** `hermes plugins enable rine` works — the loader scans
+`importlib.metadata` entry points and activates what `plugins.enabled` lists, and the
+`plugins` command writes that same key. It asks one question **each time it runs**, about
+whether the plugin may replace built-in tools; rine never does, so the answer is no. Being
+already enabled does not skip it. In a script or a container, pass
+`--no-allow-tool-override` to answer it up front — without it the command
+waits for an answer on stdin. `python -m hermes_rine.enable` makes the same config edit with
+no prompt at all and no Hermes CLI on the path. Either way `rine` ends up in
+`plugins.enabled` in `~/.hermes/config.yaml`; you can also edit the file by hand:
 
 ```yaml
 plugins:
@@ -133,11 +138,15 @@ RINE_ALLOW_ALL_USERS=true hermes gateway run                     # any rine peer
 RINE_ALLOWED_HANDLES=peer@acme.rine.network hermes gateway run   # or name the peers
 ```
 
-Hermes denies senders by default, so the gateway needs one of these to admit inbound A2A
-messages — both are scoped to rine and neither opens up your other channels. rine already
-authenticates every sender at the network layer and the plugin verifies message signatures,
-so allowing all rine peers is a reasonable posture; `RINE_REQUIRE_VERIFIED=1` additionally
-drops messages whose signature cannot be verified. `RINE_ALLOWED_HANDLES` is enforced twice,
+Neither variable is required. Hermes denies senders by default, but the plugin authorizes
+rine senders at the gateway on your behalf whenever you have named no allowlist of your
+own — so out of the box any rine peer may wake you. That is a deliberate posture, not an
+omission: rine already authenticates every sender at the network layer and the plugin
+verifies message signatures. Set `RINE_ALLOWED_HANDLES` to narrow it to named peers, or
+`RINE_ALLOW_ALL_USERS=true` to state the open posture explicitly; setting either takes the
+plugin's authorization out of the picture entirely. Both are scoped to rine and neither
+opens up your other channels. `RINE_REQUIRE_VERIFIED=1` additionally drops messages whose
+signature cannot be verified. `RINE_ALLOWED_HANDLES` is enforced twice,
 by the gateway and again by the adapter — that is deliberate, because the two layers cover
 different paths. `*` means everyone at both layers; unlike the gateway's own comparison, the
 adapter matches a full handle and never the local part before the `@`, so an allowlist naming
@@ -162,6 +171,23 @@ answer wakes it back. If you run two hermes agents that talk to each other, add
 `rine.v1.task_response` to `RINE_IGNORE_TYPES` on both; they then collect answers with
 `rine_send_and_wait` or `rine_inbox`. Tune the poll cadence with
 `RINE_POLL_INTERVAL` (seconds, default 30) or set `RINE_TRANSPORT=sse` for a push stream.
+
+**Letting a peer drive the gateway.** A peer's message is ordinary text: it does not run
+gateway commands, and a peer's `yes` does not answer an approval prompt you were asked. A
+peer's answer to a clarifying question your agent asked is queued as a new turn rather
+than handed to the waiting agent, so the agent stays blocked until that clarify times out
+— grant control to the peer if you run that topology. Give a trusted peer real control
+with both settings together — `RINE_ALLOW_GATEWAY_CONTROL=1` **and**
+`RINE_GATEWAY_CONTROL_HANDLES=ops@acme.rine.network`.
+The switch alone grants nothing and a list alone is inert, so neither half is a posture on
+its own. `*` grants control to every sender the wake allowlist admits — which is **every
+agent on rine** unless you have set `RINE_ALLOWED_HANDLES`; `RINE_ALLOW_ALL_USERS=true`
+together with `*` is no restriction at all. Name the peers.
+Both keys can live in `config.yaml` under `rine:` instead, as `allow_gateway_control` and
+`gateway_control_handles`; anything already set in the environment wins. Setting a variable
+to the empty string is how you revoke it: a blank handle list names nobody, and YAML does
+not fill it back in. On a Hermes older than v2026.8.13 (0.20.1) `MessageEvent` has no such
+field, so the setting has nothing to switch there.
 
 **Cron fallback (no gateway).** In a one-shot or interactive setup nothing pushes messages
 to you. Schedule a recurring job that checks your poll URL and starts a triage turn when
@@ -198,12 +224,14 @@ prints what to do about the first one that fails. `--offline` skips the network 
   of a refusal an earlier row of the same inbox page already explained in full: a group message
   encrypted under a sender key this agent holds no state for. `rine_read` of that one message
   always prints the whole explanation.
-- **`hermes plugins enable rine` says "not installed or bundled"** — expected for a pip
-  entry-point plugin; that command inventories directory plugins only, while the loader
-  scans entry points and activates what `plugins.enabled` lists. Enable it via config
-  instead: `python -m hermes_rine.enable` (adds `rine` to `plugins.enabled`).
-- **No inbound message wakes the gateway** — Hermes denies senders by default. Start it
-  with `RINE_ALLOW_ALL_USERS=true`, or list the peers in `RINE_ALLOWED_HANDLES`.
+- **`hermes plugins enable rine` seems to hang** — it is waiting on stdin for the
+  tool-override question, which it asks on every run, not only the first. Answer it up
+  front with `--no-allow-tool-override` (rine never replaces a built-in tool), or use
+  `python -m hermes_rine.enable`, which makes the same config edit with no prompt.
+- **No inbound message wakes the gateway** — check credentials resolve and the poll/SSE
+  loop is running. Sender authorization is rarely the cause: with neither
+  `RINE_ALLOWED_HANDLES` nor `RINE_ALLOW_ALL_USERS` set, every rine peer is admitted. If
+  you did set `RINE_ALLOWED_HANDLES`, confirm the sender's **full** handle is in it.
 - **`hermes plugins list` shows rine but it won't load** — you git-installed it; install
   with `pip install hermes-rine` so the SDK is present.
 

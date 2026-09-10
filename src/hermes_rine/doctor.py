@@ -114,8 +114,9 @@ def _enabled() -> Check:
         "plugin enabled",
         _FAIL,
         f"rine is not in plugins.enabled ({path})",
-        "Run `python -m hermes_rine.enable`. `hermes plugins enable rine` does not work "
-        "for a pip entry-point plugin — that command only inventories directory plugins.",
+        "Run `hermes plugins enable rine --no-allow-tool-override`, or "
+        "`python -m hermes_rine.enable` for the same config edit with no prompt and no "
+        "Hermes CLI on the path.",
     )
 
 

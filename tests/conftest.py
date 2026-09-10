@@ -92,6 +92,28 @@ ORG_PAYLOAD = {
 # ---------------------------------------------------------------------------
 
 
+def host_session_key_profile(owner: Any, source: Any) -> str | None:
+    """``BasePlatformAdapter._session_key_profile``'s ladder, transcribed from the host.
+
+    ONE copy, because both doubles in this file need it and two copies disagreed: the
+    off-Hermes ``BasePlatformAdapter`` stub read ``owner._owner_profile`` while
+    ``FakeAdapter`` read ``owner.profile``, so ``test_session_key.py`` was proving a
+    property of the double. The host (``gateway/platforms/base.py``, def
+    ``_session_key_profile``) resolves ``source.profile``, then the adapter's own
+    ``_owner_profile``, then the session store's resolver — the third rung is omitted
+    here because no double carries a session store. It returns None when none answers,
+    which is the single-profile answer and what keeps the key byte-identical to a call
+    that passed no profile at all.
+    """
+    for candidate in (
+        getattr(source, "profile", None) if source is not None else None,
+        getattr(owner, "_owner_profile", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
 def _install_gateway_stub() -> None:
     """Install minimal ``gateway.*`` doubles so the wake core + adapter import resolve.
 
@@ -161,6 +183,10 @@ def _install_gateway_stub() -> None:
         async def handle_message(self, event: object) -> None:  # pragma: no cover
             return None
 
+        def _session_key_profile(self, source: object | None = None) -> str | None:
+            """Mirror the host's profile resolver — see ``host_session_key_profile``."""
+            return host_session_key_profile(self, source)
+
         def register_post_delivery_callback(
             self, session_key: str, callback: object, *, generation: int | None = None
         ) -> None:
@@ -191,8 +217,17 @@ def _install_gateway_stub() -> None:
         source: object,
         group_sessions_per_user: bool = True,
         thread_sessions_per_user: bool = False,
+        profile: str | None = None,
     ) -> str:
-        """A faithful-enough session key: ``<chat_type>:<chat_id>`` (per-conversation)."""
+        """A faithful-enough session key: ``<namespace>:rine:<chat_type>:<chat_id>``.
+
+        ``profile`` selects the namespace exactly as the host's
+        ``_session_key_namespace`` does — a falsy or ``"default"`` profile is
+        ``agent:main`` (byte-identical to a call that passes no profile at all),
+        anything else is ``agent:<profile>``. The double carries the parameter
+        because a stub that silently ignored it would let a caller that forgot to
+        pass a profile read green here and re-dispatch forever in production.
+        """
         chat_id = (
             source.get("chat_id") if isinstance(source, dict) else getattr(source, "chat_id", "?")
         )
@@ -201,7 +236,8 @@ def _install_gateway_stub() -> None:
             if isinstance(source, dict)
             else getattr(source, "chat_type", "dm")
         )
-        return f"agent:main:rine:{chat_type}:{chat_id}"
+        namespace = "agent:main" if not profile or profile == "default" else f"agent:{profile}"
+        return f"{namespace}:rine:{chat_type}:{chat_id}"
 
     base.MessageType = MessageType  # type: ignore[attr-defined]
     base.ProcessingOutcome = ProcessingOutcome  # type: ignore[attr-defined]
@@ -243,8 +279,9 @@ def _install_registry_stub() -> None:
     """Install a faithful ``tools.registry`` stub when the real one is absent.
 
     The handler/tool modules import ``tool_error``/``tool_result`` at module top.
-    The stub mirrors the real JSON semantics (``registry.py:563,577``) so tests can
-    assert on the returned string identically with or without Hermes installed.
+    The stub mirrors the real JSON semantics (``tools.registry.tool_error`` /
+    ``tools.registry.tool_result``) so tests can assert on the returned string
+    identically with or without Hermes installed.
     """
     try:
         import tools.registry  # type: ignore[import-not-found]  # noqa: F401
@@ -672,7 +709,7 @@ def _rine_platform_registered() -> None:
     """Register the rine platform so ``Platform("rine")`` resolves during tests.
 
     The real ``Platform`` enum's ``_missing_`` mints a pseudo-member only for a platform
-    present in ``platform_registry`` (gateway/config.py:200). In production
+    present in ``platform_registry`` (``gateway.config.Platform._missing_``). In production
     ``register_platform`` runs at plugin load before the adapter is instantiated; the tests
     replicate that minimally. No-op off-Hermes (the guarded double accepts any string).
     """
@@ -697,7 +734,7 @@ def _rine_platform_registered() -> None:
 class FakeAdapter:
     """A double mirroring the *asynchronous* Hermes wake contract.
 
-    Like the real ``BasePlatformAdapter`` (base.py:3839), ``handle_message`` only
+    Like the real ``BasePlatformAdapter.handle_message``, ``handle_message`` only
     *schedules* the turn: it records the event and returns — it does NOT complete the
     turn, and it never fires the post-delivery callback itself. The test harness drives
     completion via ``fire_post_delivery()`` (a successful turn) or leaves it unfired (a
@@ -721,9 +758,40 @@ class FakeAdapter:
         self._raise_on_handle = bool(opts.get("raise_on_handle", False))
         # The REAL in-flight turn registry — it is plain state with no Hermes seam in it,
         # so a double would only be a second implementation to keep in step.
+        from hermes_rine._gateway_control import parse_control_handles
         from hermes_rine._turns import InboundTurns
 
         self.turns = InboundTurns()
+        # Gateway control, as ``RineAdapter.__init__`` reads it — but from opts instead of
+        # env, so a test states the posture it means rather than mutating the process.
+        # The parse and the predicate are the REAL ones: they are pure and env-free, so a
+        # double here would only be a second implementation of the rule under test.
+        self._gateway_control_on = bool(opts.get("gateway_control", False))
+        raw_control = opts.get("gateway_control_handles", "")
+        self._gateway_control_handles = parse_control_handles(
+            raw_control if isinstance(raw_control, str) else ""
+        )
+
+    def allows_gateway_control(self, sender: str) -> bool:
+        """Mirror ``RineAdapter.allows_gateway_control`` through the real predicate."""
+        from hermes_rine._gateway_control import grants_control
+
+        return grants_control(
+            enabled=self._gateway_control_on,
+            handles=self._gateway_control_handles,
+            sender=sender,
+        )
+
+    def _session_key_profile(self, source: object | None = None) -> str | None:
+        """The profile namespace ``_session_key_for`` keys the callback under.
+
+        Inherited from ``BasePlatformAdapter`` in production; delegated here to the one
+        transcription of the host's ladder (``host_session_key_profile``) because this
+        double does not subclass it. It answers None unless a test sets
+        ``adapter._owner_profile`` (or stamps ``source.profile``) — None being the
+        single-profile answer that produces today's ``agent:main`` key.
+        """
+        return host_session_key_profile(self, source)
 
     def build_source(self, **kwargs: object) -> object:
         """Return a real ``SessionSource`` under real Hermes (the rig), else a dict double.

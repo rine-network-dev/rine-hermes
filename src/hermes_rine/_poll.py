@@ -47,10 +47,12 @@ For one decrypted inbound message it, in order:
    act on), never waking the agent.
 
 **Why a post-delivery callback?** ``BasePlatformAdapter.handle_message`` returns as soon
-as the turn is *scheduled* (it spawns a background task — base.py:3839,3678), NOT after
-the turn runs. Journaling/acking right after the await would record-and-ack before the
-wake is durable → a crash mid-turn would lose the message (at-most-once). Hermes pops +
-fires our callback only after ``_message_handler`` completes (base.py ~4510), so we defer
+as the turn is *scheduled* (it hands off to ``_start_session_processing``, which spawns
+the background task), NOT after the turn runs. Journaling/acking right after the await
+would record-and-ack before the wake is durable → a crash mid-turn would lose the message
+(at-most-once). Hermes pops + fires our callback inside
+``BasePlatformAdapter._process_message_background``, only after ``_message_handler``
+completes, so we defer
 journal+ack to it: success → journaled+acked AFTER the turn (exactly-once); crash before
 the callback → message stays ``new`` + un-journaled → re-dispatched next poll
 (at-least-once, no loss); redelivery of a journaled id → re-acked, not re-dispatched.
@@ -71,6 +73,8 @@ journaled nor acked**, so it stays eligible. The ciphertext is never read — on
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import logging
 import os
 from typing import TYPE_CHECKING, Any
@@ -79,6 +83,7 @@ from rine import MessageType, is_authenticity_failure
 from rine.sender_key_words import SenderKeyRefusal
 
 from hermes_rine._format import render_message_body
+from hermes_rine._gateway_control import optional_event_kwargs
 from hermes_rine._outbound import ERROR_TYPE
 from hermes_rine._payer import maybe_auto_pay
 from hermes_rine._turns import InboundTurn
@@ -147,19 +152,70 @@ async def _ack(adapter: RineAdapter, message_id: str) -> None:
         logger.warning("rine wake: mark_delivered failed for %s", message_id, exc_info=True)
 
 
+@functools.lru_cache(maxsize=8)
+def _host_keys_by_profile(base_cls: type, build_fn: Any) -> bool:
+    """Whether this **Hermes** namespaces session keys by profile. Warns once per host.
+
+    Both halves have to be present and they did NOT arrive together upstream:
+    ``build_session_key`` grew its ``profile`` keyword at v2026.8.3, and
+    ``BasePlatformAdapter._session_key_profile`` only at v2026.8.19. Below either
+    boundary the unguarded call is a ``TypeError`` / ``AttributeError`` raised inside
+    ``_dispatch``, caught by ``_poll_loop``'s catch-all — the agent logs a generic poll
+    error and never wakes on mail again. The plugin advertises v2026.8.31 as its floor
+    and must degrade, not *crash*, below it; that is the whole reason this exists.
+
+    🔴 It probes the **host's** ``BasePlatformAdapter``, never ``type(adapter)``, and that
+    distinction is the point. A ``getattr`` on the adapter would let a fake that forgot
+    the method key its callback under ``agent:main`` while a multiplexed gateway ran the
+    turn under ``agent:<profile>`` — the callback never popped, the message never
+    journaled or acked, re-dispatched every poll forever. Probing the base class instead
+    means a supported host always answers True, so such a fake raises ``AttributeError``
+    loudly, exactly as it did before this guard existed.
+    """
+    has_resolver = hasattr(base_cls, "_session_key_profile")
+    try:
+        takes_profile = "profile" in inspect.signature(build_fn).parameters
+    except (TypeError, ValueError):  # pragma: no cover — a C-level or unreadable callable
+        takes_profile = False
+    if has_resolver and takes_profile:
+        return True
+    logger.warning(
+        "rine wake: this Hermes does not key sessions by profile "
+        "(BasePlatformAdapter._session_key_profile present=%s, build_session_key accepts "
+        "profile=%s). That predates v2026.8.19 and is below hermes-rine's advertised "
+        "floor of v2026.8.31. The wake channel keeps working; on a MULTI-PROFILE gateway "
+        "the post-delivery callback would be keyed under the wrong namespace and "
+        "messages would re-dispatch. Upgrade Hermes.",
+        has_resolver,
+        takes_profile,
+    )
+    return False
+
+
 def _session_key_for(adapter: RineAdapter, source: Any) -> str:
     """Compute the Hermes session key for ``source`` exactly as ``handle_message`` does.
 
-    Isolated here so a ``build_session_key`` signature change touches one place. The two
-    ``*_per_user`` toggles mirror base.py:3857-3861 (read off ``config.extra``).
+    Isolated here so a ``build_session_key`` signature change touches one place. All three
+    keywords mirror the ``build_session_key`` call inside
+    ``BasePlatformAdapter.handle_message``: the two ``*_per_user`` toggles read off
+    ``config.extra``, and ``profile`` comes from the adapter's own
+    ``_session_key_profile`` — offered only when :func:`_host_keys_by_profile` says this
+    host has both halves of that mechanism.
     """
-    from gateway.platforms.base import build_session_key  # type: ignore[import-not-found]
+    from gateway.platforms.base import (  # type: ignore[import-not-found]
+        BasePlatformAdapter,
+        build_session_key,
+    )
 
     extra = getattr(adapter.config, "extra", {}) or {}
+    optional: dict[str, Any] = {}
+    if _host_keys_by_profile(BasePlatformAdapter, build_session_key):
+        optional["profile"] = adapter._session_key_profile(source)
     return build_session_key(
         source,
         group_sessions_per_user=extra.get("group_sessions_per_user", True),
         thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+        **optional,
     )
 
 
@@ -352,6 +408,15 @@ def _build_event(
         message_id=str(msg.id),
         internal=True,
         auto_skill="rine:rine",
+        # A peer's message is untrusted payload text, so it does not drive the operator's
+        # gateway unless the operator named that peer. Passed through
+        # ``optional_event_kwargs`` because the field does not exist below the advertised
+        # floor, and an unknown kwarg to this dataclass is a TypeError that stops the
+        # plugin waking on mail at all.
+        **optional_event_kwargs(
+            MessageEvent,
+            allow_gateway_control=adapter.allows_gateway_control(sender),
+        ),
     )
     return event, source
 

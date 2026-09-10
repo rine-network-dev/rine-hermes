@@ -57,6 +57,13 @@ def _adapter(client: FakeConnectClient):
     adapter._agent_handle = ""
     adapter._listen_task = None
     adapter._running = False
+    # ``connect`` announces the gateway-control posture, so these three are part of what
+    # it reads. This is what ``__init__`` produces from an unset environment: control off,
+    # nobody named, and the WAKE allowlist allow-all — ``None`` here meaning the opposite
+    # of what ``None`` means on the line above it (see ``parse_control_handles``).
+    adapter._gateway_control_on = False
+    adapter._gateway_control_handles = frozenset()
+    adapter._allowed_handles = None
     return adapter
 
 

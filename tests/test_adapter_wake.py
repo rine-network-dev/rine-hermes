@@ -72,6 +72,11 @@ def _real_adapter(tmp_path, client):
     adapter._turns = InboundTurns()
     adapter._require_verified = False
     adapter._allowed_handles = None
+    # Gateway control off, which is also what ``__init__`` reads from an unset
+    # environment: the two attributes are hand-wired here for the same ``__new__``
+    # reason as everything above.
+    adapter._gateway_control_on = False
+    adapter._gateway_control_handles = frozenset()
     adapter._running = True
     adapter._message_handler = None
     adapter._post_delivery_callbacks = {}

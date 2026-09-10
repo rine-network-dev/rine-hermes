@@ -32,12 +32,17 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN uv python install 3.11
 
 # Hermes source, pinned to an exact commit (the repo tags by CalVer — this commit is the
-# tag v2026.8.31, pyproject version 0.21.0). Fetch-by-SHA (GitHub allows it) keeps the image
+# tag v2026.9.7, pyproject version 0.21.1). Fetch-by-SHA (GitHub allows it) keeps the image
 # reproducible and identical to the reference source the build read; the tag is annotated, so
-# `git rev-parse v2026.8.31` yields the TAG object, not this commit — always pin the commit.
+# `git rev-parse v2026.9.7` yields the TAG object, not this commit — always pin the commit.
 # Editable install into the named-volume venv happens in the entrypoint (first run).
-# Previous pin: d62979a6f34f64f2ed840f159aac66e24d7cad78 (v0.16.0-era main tip).
-ARG HERMES_REF=29112bef099274229cadff79cdff7bf7b99c4b77
+#
+# 🔴 The rig pin and the advertised floor are DIFFERENT NUMBERS, deliberately. `pyproject.toml`
+# floors users at v2026.8.31 / 0.21.0 — the oldest release whose behaviour we make claims about —
+# while this rig tests against the newest, so upstream drift surfaces here before it reaches a
+# user. Raising the pin does not raise the floor; that is a separate, stated decision.
+# Previous pin: 29112bef099274229cadff79cdff7bf7b99c4b77 (v2026.8.31, 0.21.0 — the floor).
+ARG HERMES_REF=2237be355906fbe6065ce1815711eee52b2d646e
 RUN git init /opt/hermes \
  && git -C /opt/hermes remote add origin https://github.com/NousResearch/hermes-agent \
  && git -C /opt/hermes fetch --depth 1 origin "${HERMES_REF}" \

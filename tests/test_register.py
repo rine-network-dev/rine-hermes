@@ -14,6 +14,8 @@ import socket
 import pytest
 
 import hermes_rine
+from hermes_rine import _gateway_control
+from hermes_rine import platform as rine_platform
 
 _EXPECTED_TOOLS = [
     "rine_send",
@@ -92,7 +94,14 @@ def test_platform_hint_tells_the_model_its_answer_is_the_reply(fake_ctx):
 def test_registration_offers_the_rine_scoped_allowlist_variables(monkeypatch, fake_ctx):
     # Without these the gateway falls back to its global allow-all, which the README used
     # to instruct — one variable that opens every channel, to admit one.
-    entry_fields = {"name", "label", "allowed_users_env", "allow_all_env", "cron_deliver_env_var"}
+    entry_fields = {
+        "name",
+        "label",
+        "allowed_users_env",
+        "allow_all_env",
+        "cron_deliver_env_var",
+        "apply_yaml_config_fn",
+    }
     _patch_platform_entry_fields(monkeypatch, entry_fields)
 
     hermes_rine.register(fake_ctx)
@@ -101,6 +110,75 @@ def test_registration_offers_the_rine_scoped_allowlist_variables(monkeypatch, fa
     assert platform["allowed_users_env"] == "RINE_ALLOWED_HANDLES"
     assert platform["allow_all_env"] == "RINE_ALLOW_ALL_USERS"
     assert platform["cron_deliver_env_var"] == "RINE_HOME_CHANNEL"
+
+
+def test_registration_offers_the_yaml_bridge_for_the_gateway_control_keys(monkeypatch, fake_ctx):
+    # The only entry kwarg that is a callable rather than an env var NAME, and the only
+    # way ``allow_gateway_control:`` in config.yaml reaches the adapter at all. Identity,
+    # not truthiness: a bridge registered under the wrong name silently never runs, and
+    # the YAML block would then be read by nobody while config.yaml looked configured.
+    _patch_platform_entry_fields(monkeypatch, {"name", "label", "apply_yaml_config_fn"})
+
+    hermes_rine.register(fake_ctx)
+
+    assert fake_ctx.platforms[0]["apply_yaml_config_fn"] is _gateway_control.apply_yaml_config
+
+
+def test_registration_offers_the_wake_authorization_seed(monkeypatch, fake_ctx):
+    # 🔴 This is what stops a peer's SECOND message being silently dropped. Hermes
+    # v2026.9.7 admits a busy-session event early only when it is internal AND carries
+    # allow_gateway_control, which this plugin now sets False by design — so the wake
+    # falls through to the gateway's default-denying authorization check unless the
+    # platform's own allowlist authorizes it. Identity, not truthiness: a seed registered
+    # under the wrong name never runs and the drop comes back with nothing in the
+    # transcript to explain it.
+    _patch_platform_entry_fields(monkeypatch, {"name", "label", "env_enablement_fn"})
+
+    hermes_rine.register(fake_ctx)
+
+    assert fake_ctx.platforms[0]["env_enablement_fn"] is rine_platform._wake_authorization_seed
+
+
+def test_wake_seed_authorizes_every_sender_when_the_operator_named_no_allowlist(monkeypatch):
+    # No wake allowlist means the adapter's own gate is already allow-all and the cold
+    # path admits everyone regardless, so seeding "*" makes the busy path agree with the
+    # posture the operator already has — it does not widen it.
+    monkeypatch.delenv(rine_platform.ALLOWED_HANDLES_ENV, raising=False)
+    monkeypatch.delenv(rine_platform.ALLOW_ALL_ENV, raising=False)
+
+    assert rine_platform._wake_authorization_seed() == {"allowed_users": "*"}
+
+
+def test_wake_seed_is_empty_when_handles_are_named(monkeypatch):
+    # 🔴 The load-bearing case. An env allowlist wins over `extra` inside the gateway, so
+    # a seed would be inert — but `extra.update(seed)` overwrites, and the hook takes no
+    # arguments, so returning one anyway would clobber whatever the operator configured.
+    # Returning nothing is what keeps this precise instead of a blanket fail-open.
+    monkeypatch.setenv(rine_platform.ALLOWED_HANDLES_ENV, "ops@acme.rine.network")
+    monkeypatch.delenv(rine_platform.ALLOW_ALL_ENV, raising=False)
+
+    assert rine_platform._wake_authorization_seed() == {}
+
+
+def test_wake_seed_is_empty_when_allow_all_is_set(monkeypatch):
+    # The gateway already authorizes every sender via allow_all_env; a seed adds nothing
+    # and would overwrite for the same reason as above.
+    monkeypatch.delenv(rine_platform.ALLOWED_HANDLES_ENV, raising=False)
+    monkeypatch.setenv(rine_platform.ALLOW_ALL_ENV, "true")
+
+    assert rine_platform._wake_authorization_seed() == {}
+
+
+def test_wake_seed_treats_a_blank_handle_list_as_no_allowlist(monkeypatch):
+    # 🔴 Truthiness here, presence in _gateway_control.apply_yaml_config, and the
+    # asymmetry is deliberate. A blank RINE_ALLOWED_HANDLES is not an allowlist of
+    # nobody — adapter._parse_allowed_handles reads it as allow-all — so it is exactly
+    # the case that needs seeding. A blank RINE_GATEWAY_CONTROL_HANDLES means the
+    # opposite, which is why that site must not copy this test's rule.
+    monkeypatch.setenv(rine_platform.ALLOWED_HANDLES_ENV, "")
+    monkeypatch.delenv(rine_platform.ALLOW_ALL_ENV, raising=False)
+
+    assert rine_platform._wake_authorization_seed() == {"allowed_users": "*"}
 
 
 def test_registration_omits_variables_the_host_does_not_declare(monkeypatch, fake_ctx):
@@ -115,6 +193,13 @@ def test_registration_omits_variables_the_host_does_not_declare(monkeypatch, fak
     assert "allowed_users_env" not in platform
     assert "allow_all_env" not in platform
     assert "cron_deliver_env_var" not in platform
+    # 🔴 Both callables are dropped by the same rule as the strings. Hermes 0.16.0's
+    # PlatformEntry has no such field, and an undeclared kwarg is a TypeError out of the
+    # dataclass constructor — the plugin would not register at all. The cost of dropping
+    # env_enablement_fn is the busy-path drop on such a host; the cost of NOT dropping it
+    # is no plugin at all, which is worse.
+    assert "apply_yaml_config_fn" not in platform
+    assert "env_enablement_fn" not in platform
 
 
 def _patch_platform_entry_fields(monkeypatch, names: set[str]) -> None:

@@ -74,11 +74,10 @@ model:
 # Surface the rine toolset in CLI sessions (the plugin registers toolset "rine").
 platform_toolsets:
   cli: [terminal, file, skills, todo, rine]
-# Enable the rine plugin. NOTE: \`hermes plugins enable rine\` does NOT work for pip
-# entry-point plugins — that command's discovery (_discover_all_plugins) inventories
-# bundled/user DIRECTORY plugins only, so it reports "not installed or bundled". The
-# loader (discover_and_load -> _scan_entry_points) DOES find pip plugins and gates them on
-# this config key. So the correct enable path for a pip plugin is config-based:
+# Enable the rine plugin. \`hermes plugins enable rine --no-allow-tool-override\` writes
+# this same key and works for a pip entry-point plugin; the rig writes the key directly
+# because the config file is generated here in one piece anyway, and a second process
+# round-trip would only add a way for the bootstrap to fail.
 plugins:
   enabled: [rine]
 YAML

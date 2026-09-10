@@ -1,18 +1,20 @@
 """``python -m hermes_rine.enable`` — idempotently enable the ``rine`` plugin.
 
-Hermes' plugin **loader** does find a pip entry-point plugin like this one — it scans
-``importlib.metadata`` at startup — and activates whatever ``plugins.enabled`` lists. The
-``hermes plugins`` **command** is a separate discovery pass that walks bundled and user
-*directory* plugins only, so ``hermes plugins enable rine`` reports the plugin "not
-installed or bundled" even though it is installed and will load. Activation is therefore
-config-based: add ``rine`` to ``plugins.enabled`` in ``~/.hermes/config.yaml``. This helper
-does exactly that, idempotently, so the user never has to hand-edit YAML.
+Hermes' plugin **loader** finds a pip entry-point plugin like this one — it scans
+``importlib.metadata`` at startup — and activates whatever ``plugins.enabled`` lists.
+``hermes plugins enable rine`` writes that same key, and works. It asks one question
+**each time it runs** — being already enabled does not skip it — about whether the plugin
+may replace built-in tools (rine never does, so the answer is no), and waits on stdin for
+the answer unless ``--no-allow-tool-override`` answers it up front. This helper makes the
+same config edit with no prompt at all and no Hermes CLI on the path: it adds ``rine``
+to ``plugins.enabled``, idempotently, so the user never has to hand-edit YAML.
 
 Config-path resolution (first that works):
   1. ``hermes_cli.config.get_config_path()`` (authoritative; honours ``HERMES_HOME`` and
      profiles) — used when running inside the Hermes venv;
   2. ``$HERMES_HOME/config.yaml`` if ``HERMES_HOME`` is set;
-  3. ``~/.hermes/config.yaml``.
+  3. ``%LOCALAPPDATA%\\hermes\\config.yaml`` on Windows, ``~/.hermes/config.yaml``
+     everywhere else.
 
 YAML round-trips through ``ruamel.yaml`` (preserves comments/formatting) when available,
 else ``pyyaml``. Import is side-effect-free: no path resolution, no file reads, no YAML
@@ -37,7 +39,17 @@ def resolve_config_path() -> Path:
     import os
 
     home = os.getenv("HERMES_HOME")
-    base = Path(home) if home else Path.home() / ".hermes"
+    if home:
+        base = Path(home)
+    elif sys.platform == "win32":
+        # Hermes puts its home under LOCALAPPDATA on Windows, so a fallback to
+        # ``~/.hermes`` there would write a second config the loader never reads and
+        # report success. Only this branch is a guess-free copy of that rule; the
+        # authoritative resolution above is used whenever Hermes is importable.
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        base = (Path(local) if local else Path.home() / "AppData" / "Local") / "hermes"
+    else:
+        base = Path.home() / ".hermes"
     return base / "config.yaml"
 
 

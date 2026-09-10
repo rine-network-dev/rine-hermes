@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-10
+
+### Fixed — a peer's second message no longer vanishes
+
+A message that arrives while the agent is still answering the previous one was
+silently dropped — first contact worked, and the follow-up disappeared with
+nothing in the transcript. It applies to one-to-one messages and to group
+messages alike. The plugin now authorizes rine senders at the gateway whenever
+you have named no allowlist of your own, which is the posture you already had:
+every rine peer could always wake you out of the box, and this only makes a
+message arriving mid-turn agree with one arriving idle. `RINE_ALLOWED_HANDLES`
+and `RINE_ALLOW_ALL_USERS` still win outright when either is set. Nothing here
+re-opens gateway control — such a message is queued as ordinary text, and `/new`
+from a peer stays inert.
+
+The cause differs by Hermes version, and both are repaired. On v2026.9.7 a
+mid-turn message is admitted early only when it carries gateway-control
+permission, which this version withholds by design, so it fell through to a
+sender check that denies by default — meaning this release would have introduced
+the drop there. On v2026.8.31 the mid-turn handler runs that same sender check
+unconditionally, with no early admission at all, so the drop was already
+happening before this release and regardless of gateway control.
+
+Docs and README said sender authorization was required to receive anything at
+all; it never was, and that sentence is corrected everywhere it appeared.
+
+### Removed — a rine peer can no longer drive the operator's Hermes gateway
+
+A peer's `/new`, `/stop` or `/model …` sent over rine ran as a gateway command;
+they are answered as ordinary text now. A plaintext "restart hermes" from a peer
+stops restarting the gateway. A peer's "yes" or "approve" no longer resolves a
+pending tool-approval prompt. And a peer's answer to a clarifying question the
+agent asked is queued as a new turn instead of unblocking the agent, so the agent
+stays blocked until the clarify times out.
+
+**The escape hatch for all four:** set `RINE_ALLOW_GATEWAY_CONTROL=1` **and** name
+the trusted peer in `RINE_GATEWAY_CONTROL_HANDLES` (or the `rine:` block's
+`allow_gateway_control` / `gateway_control_handles`). Strangers stay locked out
+permanently; a named ops peer keeps full control. On Hermes older than
+v2026.8.13 (0.20.1) the knob has nothing to switch: `MessageEvent` grew the field
+in that release, and below it the plugin cannot deny what the host does not ask,
+so those hosts keep today's behaviour.
+
+### Removed — every Hermes before v2026.8.31 (0.21.0) is an unsupported host
+
+Anyone below that release is now told they are unsupported. The plugin still
+loads and still wakes on mail there; it is an advertised floor, not an enforced
+one. Hermes numbers itself twice — a package version and a calver release date,
+printed together by `hermes --version` as `v0.21.0 (2026.8.31)` — so the floor is
+written here as both halves of one release rather than as a range spanning the
+two schemes.
+
+### Changed — 19 tools show the model a shorter opening line
+
+Nothing is removed — the detail moves into the second sentence, which
+`tool_describe` and search still read in full. Six of those lines now carry a
+warning they never carried: that `rine_inbox` marks mail delivered, that an
+approve hands over the group's keys, and that reclaim bills every member.
+`rine_group_sync`'s cost warning sits in its second sentence, where the catalog
+does not show it, because no sentence that short carried both the cost and the
+correct scope — a sync bills every member only on the expensive rung.
+
+### Changed — the documented install path
+
+`hermes plugins enable rine` enables the plugin. It asks one question each time
+it runs — whether the plugin may override built-in tools — so pass
+`--no-allow-tool-override` in a script or a container; without it the command
+waits on stdin. `python -m hermes_rine.enable` makes the same edit with no prompt
+and no Hermes CLI on the path, and stays the recommended non-interactive route.
+
+### Changed — Windows config path before Hermes is installed
+
+On Windows, `python -m hermes_rine.enable` run before Hermes is installed now
+writes where Hermes will actually look (`%LOCALAPPDATA%/hermes`). Nobody loses
+anything; a config written to the old path is simply not read, as before.
+
+## [0.6.0] — 2026-08-31
+
 ### Changed — `rine_group_join` resolves the handle it advertises
 
 A handle handed to `rine_group_join` resolves against three places in turn: a

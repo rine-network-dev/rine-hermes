@@ -48,7 +48,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     for s in (
         _schema(
             "rine_send",
-            "Send an encrypted message to another agent (or a group) on the rine network. "
+            "Send an encrypted message to an agent or a group. "
             "Performs a real, irreversible network send. Name a group by its own name — "
             "to='logistics' — or by its full handle, to='#logistics@acme.rine.network'. "
             "Use to='kofi@acme.rine.network' for 1:1.",
@@ -65,9 +65,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_send_and_wait",
-            "Send a message to another agent and block until they reply or the timeout "
-            "elapses. The delegate-and-await primitive. Performs a real network send. "
-            "1:1 only (not groups).",
+            "Send to one agent (never a group) and await the reply. "
+            "It blocks until the reply arrives or the timeout elapses. "
+            "The delegate-and-await primitive. Performs a real network send.",
             {
                 "to": _p("string", "Recipient handle/UUID (1:1 only — not a group)."),
                 "body": _BODY,
@@ -85,7 +85,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_inbox",
-            "Read the rine inbox and return the messages' decrypted contents. Defaults to "
+            "Read new rine mail; this marks what it reads delivered. "
+            "Returns the messages' decrypted contents. Defaults to "
             "status='new' — the undelivered mail — and on that path only, marks the ones it "
             "could read delivered, so the next check returns only newer mail. Ask for "
             "'delivered', 'read' or 'all' to look back over mail this agent has already "
@@ -138,8 +139,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_thread",
-            "Fetch the both-sided, decrypted transcript of a conversation or a group by "
-            f"reference. {TRANSCRIPT_REFERENCE_REQUIRED} "
+            "Fetch a conversation's or group's decrypted transcript. "
+            f"Both-sided, addressed by reference. {TRANSCRIPT_REFERENCE_REQUIRED} "
             "Returns every turn (yours and the peer's) oldest-to-newest, role-tagged. "
             "A turn you cannot decrypt renders [unavailable], except one sealed "
             "under a sender key this agent does not hold, which says so on the "
@@ -163,8 +164,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_discover",
-            "Search the public rine agent directory (no auth required) to find agents to "
-            "message. Returns matching agents with their handles.",
+            "Search the public rine directory for agents to message. "
+            "No auth required. Returns matching agents with their handles.",
             {
                 "q": _p("string", "Free-text search query."),
                 "category": _p("string", "Filter by category."),
@@ -181,7 +182,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_inspect",
-            "Get the full public profile of one rine agent by handle or id.",
+            "Get one rine agent's full public profile. Name the agent by handle or id.",
             {
                 "handle_or_id": _p(
                     "string",
@@ -192,7 +193,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_whoami",
-            "Show this agent's own rine identity — org, handle(s), and trust tier. Use to "
+            "Show this agent's own rine identity and trust tier. "
+            "Reports the org and every handle it owns. Use to "
             "confirm credentials resolve and learn your own handle. It does not say which "
             "groups those handles are seated in; rine_groups reports that per group "
             "(your_agents).",
@@ -266,8 +268,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_invite",
-            "Invite one agent (agent_to_invite) or several at once (agents_to_invite) "
-            "into a group you administer. On a closed group this mints an invitation the "
+            "Invite agents into a group, or nominate them for a vote. "
+            "Name one with agent_to_invite or several with agents_to_invite. You must "
+            "administer the group. On a closed group this mints an invitation the "
             "agent spends by joining. On a majority- or unanimity-enrollment group it "
             "NOMINATES instead: it files a join request the group's electorate decides, "
             "your own invite counts as one approval, and nobody is seated until the vote "
@@ -295,8 +298,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_remove",
-            "Remove a member from a group you administer, or leave a group by naming "
-            "your own agent. On an MLS group this posts a real Remove commit that "
+            "Remove a member, or leave by naming your own agent. "
+            "Removing anyone but yourself requires admin. "
+            "On an MLS group this posts a real Remove commit that "
             "takes the member's ratchet-tree leaf with it, so it is an O(members) "
             "operation that can fail; an open group has no cryptographic eviction — "
             "the server stops delivering to them, and what bounds their reach into "
@@ -321,7 +325,8 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_inspect",
-            "Show a group's details and encryption mode: post-quantum MLS, an MLS group "
+            "Show a group's details and encryption mode. "
+            "The mode is post-quantum MLS, an MLS group "
             "still initialising, or sender-key. Every mode is readable and postable from "
             "here. It resolves the group out of the same ORG-scoped list rine_groups "
             "returns, so it reports a group's kind and never that the agent you name is "
@@ -331,7 +336,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_join",
-            "Join a group, or submit a join request if the group is vote-gated. Calling it "
+            "Join a group, or request to join a vote-gated one. Calling it "
             "on a nomination a member filed for this agent records this agent's consent to "
             "it and answers the request row; it does not join the group, because the "
             "electorate still has to carry the vote. Performs a real, irreversible network "
@@ -345,20 +350,20 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_invites",
-            "List the open offers addressed to this agent across all groups: invitations "
-            "to accept, and nominations a member filed on this agent's behalf, told apart "
-            "by status. An invited row is spent by rine_group_join. A pending row is a "
-            "nomination the group's electorate decides — calling rine_group_join on it "
-            "records this agent's consent, which the vote needs before it can seat "
-            "anyone. This is the only place a nomination is visible to the agent it "
+            "List the invitations and nominations open to this agent. "
+            "It spans every group. Both are offers this agent has not answered, told "
+            "apart by status: an invited row is spent by rine_group_join; a pending row "
+            "is a nomination the group's electorate decides. Calling rine_group_join on a "
+            "pending row records this agent's consent, which the vote needs before it can "
+            "seat anyone. This is the only place a nomination is visible to the agent it "
             "names.",
             {"agent": _ACTING_AGENT},
             [],
         ),
         _schema(
             "rine_group_requests",
-            "List what a group still owes an answer on: the vote queue (pending), its "
-            "unaccepted invitations (invited), or both (live). Read-only. Use it to find "
+            "List a group's pending votes and unaccepted invitations. "
+            "Ask for 'pending', 'invited', or 'live' for both. Read-only. Use it to find "
             "the request_id rine_group_vote needs, and to see why a group is full when "
             "its member count says otherwise — an unaccepted invitation holds a "
             "ratchet-tree seat until it is accepted or expires. Each pending row "
@@ -384,8 +389,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_vote",
-            "Vote to approve or deny a pending join request in a majority- or "
-            "unanimity-enrollment group. An approve that crosses the threshold admits "
+            "Vote on a join request; an approve grants the group's keys. "
+            "Approve or deny; majority- and unanimity-enrollment groups only. "
+            "An approve that crosses the threshold admits "
             "the applicant and mints their ratchet-tree leaf and Welcome as part of the "
             "same call — it hands a stranger the group's keys and cannot be taken back. "
             f"{VOTE_ELECTORATE_RULE} rine_group_requests reports, per request, whether "
@@ -417,8 +423,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_sync",
-            "Catch this agent's encryption state for a group up with the group, and "
-            "report what it cost. Run it when a group's messages stop decrypting. On "
+            "Catch this agent up with a group's encryption state. "
+            "It can post an external commit billed to every member, and reports what it "
+            "cost. Run it when a group's messages stop decrypting. On "
             "an MLS group the cheap rung replays the commits the server still holds "
             "and posts nothing; the expensive one posts a single external commit that "
             "re-seats this agent's existing leaf, which is O(members) and billed to "
@@ -434,8 +441,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_reclaim",
-            "Retire the ratchet-tree leaves an MLS group no longer owes anyone — the "
-            "ones left behind by invitations nobody accepted and by members who left. "
+            "Retire a group's orphaned leaves, at every member's cost. "
+            "An orphan is a ratchet-tree leaf left by an invitation nobody accepted or "
+            "by a member who left. "
             "Run it on a group whose Welcomes and commits have grown heavy after a lot "
             "of churn; nothing does it automatically, because the server holds no MLS "
             "keys. It first seats every member and invitee that is not seated yet, then "

@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 from typing import Any
 
+from hermes_rine import _gateway_control
 from hermes_rine._gate import rine_creds_available
 
 logger = logging.getLogger("hermes_rine.platform")
@@ -35,6 +37,78 @@ _PLATFORM_HINT = (
     "for usage."
 )
 
+#: The two variables that give the gateway a real wake allowlist. Named once because
+#: :data:`_OPTIONAL_ENTRY_KWARGS` hands them to the gateway and
+#: :func:`_wake_authorization_seed` has to read the same two back.
+ALLOWED_HANDLES_ENV = "RINE_ALLOWED_HANDLES"
+ALLOW_ALL_ENV = "RINE_ALLOW_ALL_USERS"
+
+_ALLOW_EVERY_SENDER = "*"
+
+
+def _wake_authorization_seed() -> dict[str, Any]:
+    """Authorize rine senders at the gateway when the operator has named no allowlist.
+
+    🔴 Without this, a peer's **second** message is silently dropped. Hermes v2026.9.7
+    rewrote the busy-session path — the one that runs when a message arrives while a turn
+    is still going — to admit an event early only when it is ``internal`` **and** carries
+    ``allow_gateway_control``. This plugin now sets that flag False on every inbound
+    message by design, so a rine wake no longer takes the early exit and falls through to
+    the gateway's own authorization check, which default-**denies**. First contact works;
+    the follow-up vanishes with nothing in the transcript. Measured, not inferred: all four
+    cells — cold/busy against the flag True/False — were driven through a real gateway, and
+    only busy-plus-False drops. The cold path deliberately does *not* key on the flag, so
+    the flag is not the whole story and reading the code alone would have got this wrong.
+
+    🔴 The flag is **not** the cause at the advertised floor, and the seed is not optional
+    there either. At v2026.8.31 the busy handler has no early admission at all — it calls
+    the same default-denying check as its first statement — so the mid-turn message dropped
+    there before this package ever touched the flag, and drops with the flag *set*. Two
+    different upstream shapes, one repair: ``env_enablement_fn`` is a ``PlatformEntry``
+    field at the floor as well as at the pin, so the seed registers and fixes both. Do not
+    rewrite this as a 9.7-only story — that reading was written down once and measured
+    false.
+
+    Both apply to ``chat_type="group"`` exactly as to ``"dm"``. There is no second key to
+    seed: the group arm falls back to the same ``extra["allowed_users"]`` because this
+    entry declares ``allowed_users_env``, proved by clearing that field and watching the
+    group verdict flip to dropped and back.
+
+    The seed lands in ``PlatformConfig.extra`` via ``env_enablement_fn`` — the same sweep
+    that already auto-enables rine once credentials resolve, so it demonstrably runs with
+    no ``rine:`` block in ``config.yaml``. ``apply_yaml_config_fn`` cannot carry it: the
+    loader calls that hook only when such a block exists, and our documented install has
+    none.
+
+    🔴 It returns **nothing** when either variable is set, and that is what keeps this
+    precise rather than a blanket fail-open. An env allowlist takes precedence over
+    ``extra`` inside the gateway, so a seed would be inert there anyway — but returning it
+    would still overwrite whatever the operator put in ``extra``, because the hook takes no
+    arguments and cannot see the config it is about to update.
+
+    The one shape that can still be overwritten is an undocumented hand-written
+    ``platforms.rine.extra.allowed_users`` in ``config.yaml`` with neither variable set.
+    That is not a widening in effect: with no wake allowlist, the adapter's own gate is
+    already allow-all and the cold path admits every sender regardless, so the operator is
+    reachable by anyone today and this only makes the busy path agree with the cold one.
+    It is named here so it reads as a known edge rather than an oversight.
+
+    Truthiness, not presence — the inverse of ``_gateway_control.apply_yaml_config``, and
+    deliberately: a blank ``RINE_ALLOWED_HANDLES`` is not an allowlist of nobody, it is no
+    allowlist at all (``adapter._parse_allowed_handles`` reads it as allow-all), so the
+    blank case is exactly the case that needs seeding. A blank
+    ``RINE_GATEWAY_CONTROL_HANDLES`` means the opposite, which is why that site tests
+    presence.
+
+    Returns:
+        ``{"allowed_users": "*"}`` when no wake allowlist is configured, else ``{}`` — the
+        gateway treats an empty dict as no seed at all.
+    """
+    if os.getenv(ALLOWED_HANDLES_ENV) or os.getenv(ALLOW_ALL_ENV):
+        return {}
+    return {"allowed_users": _ALLOW_EVERY_SENDER}
+
+
 # Gateway-side registration extras that older Hermes releases may not know. ``PlatformEntry``
 # is a dataclass, so an unrecognised key raises TypeError out of its constructor and takes
 # the whole plugin down with it; each key is offered only when the installed dataclass
@@ -49,15 +123,37 @@ _PLATFORM_HINT = (
 #
 # ``cron_deliver_env_var`` names rine's home-channel variable so rine is a legal
 # cron-delivery target rather than falling through to a derived default.
-_OPTIONAL_ENTRY_KWARGS = {
-    "allowed_users_env": "RINE_ALLOWED_HANDLES",
-    "allow_all_env": "RINE_ALLOW_ALL_USERS",
+#
+# ``apply_yaml_config_fn`` is the one value here that is a callable rather than an env var
+# NAME, which is why the dict is annotated ``dict[str, Any]``. It lets the two
+# gateway-control settings be written in ``config.yaml`` instead of the environment; see
+# :mod:`hermes_rine._gateway_control`.
+# ``env_enablement_fn`` is the second callable: it seeds the gateway's per-platform
+# allowlist so a peer's second message is queued rather than dropped. See
+# :func:`_wake_authorization_seed` — that drop is the one thing in this release a code
+# reading alone would have shipped.
+_OPTIONAL_ENTRY_KWARGS: dict[str, Any] = {
+    "allowed_users_env": ALLOWED_HANDLES_ENV,
+    "allow_all_env": ALLOW_ALL_ENV,
     "cron_deliver_env_var": "RINE_HOME_CHANNEL",
+    "apply_yaml_config_fn": _gateway_control.apply_yaml_config,
+    "env_enablement_fn": _wake_authorization_seed,
 }
 
 
-def _supported_entry_kwargs() -> dict[str, str]:
-    """The subset of :data:`_OPTIONAL_ENTRY_KWARGS` the installed ``PlatformEntry`` accepts."""
+def _supported_entry_kwargs() -> dict[str, Any]:
+    """The subset of :data:`_OPTIONAL_ENTRY_KWARGS` the installed ``PlatformEntry`` accepts.
+
+    🔴 ``_gateway_control.optional_event_kwargs`` filters the same way for ``MessageEvent``
+    and the two are deliberately NOT one helper. This one fails **closed** — an entry
+    kwarg the host does not declare is a ``TypeError`` out of the ``PlatformEntry``
+    constructor, which takes the whole plugin down at registration, so the safe answer to
+    "I could not introspect" is to offer nothing. That one fails **open**, because the
+    suite's ``MessageEvent`` double is a plain ``**kwargs`` class that
+    ``dataclasses.fields`` refuses. Consolidating them onto either arm breaks the other
+    caller; the reasons are written out at both sites so the divergence reads as a
+    decision rather than an oversight.
+    """
     try:
         from gateway.platform_registry import (  # type: ignore[import-not-found]
             PlatformEntry,

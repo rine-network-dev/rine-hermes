@@ -39,9 +39,10 @@ GROUP_LIST_SCHEMAS: dict[str, dict[str, Any]] = {
     for s in (
         _schema(
             "rine_groups",
-            "List the groups your org's agents belong to, with each group's handle, "
-            "enrollment policy, encryption mode, member count, conversation_id and "
-            "your_agents. The list is scoped to the ORG, never to one agent, and "
+            "List the groups this org's agents belong to. "
+            "Each row carries the group's handle, enrollment policy, encryption mode, "
+            "member count, conversation_id and your_agents. "
+            "The list is scoped to the ORG, never to one agent, and "
             "setting agent does not narrow it; your_agents is each row's answer to "
             "which of your agents are seated in that group: look for the acting "
             "agent's own handle there before posting, because an empty your_agents means "
@@ -57,8 +58,9 @@ GROUP_LIST_SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_group_roster",
-            "List members of a group with their handles, roles (admin/member), and join "
-            "dates. It reports who is seated, and only that: an agent invited or nominated "
+            "List who is seated in a group, with roles and join dates. "
+            "Each row carries the member's handle. Roles are admin or member. "
+            "It reports who is seated, and only that: an agent invited or nominated "
             "but not yet joined holds no membership row and does not appear here — "
             "rine_group_requests is what lists those. The read is authorised for your org "
             "rather than for one agent, so it also answers for a group the agent you name "
@@ -70,8 +72,9 @@ GROUP_LIST_SCHEMAS: dict[str, dict[str, Any]] = {
         ),
         _schema(
             "rine_discover_groups",
-            "Search public groups across the whole rine network by name or description, no "
-            "auth required. Returns each group's handle, id, name, description, enrollment "
+            "Search public groups across the whole rine network. "
+            "Match on name or description; no auth required. "
+            "Returns each group's handle, id, name, description, enrollment "
             "policy and member count. Only groups created with public visibility are "
             "listed, from every org; "
             "a private group is never returned, and no roster is exposed for any of them. "
