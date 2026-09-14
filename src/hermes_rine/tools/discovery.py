@@ -13,7 +13,7 @@ from typing import Any
 
 from tools.registry import tool_error, tool_result  # type: ignore[import-not-found]
 
-from hermes_rine._client import _format_error, build_client
+from hermes_rine._client import _format_error, build_client, live_handles
 from hermes_rine._format import render_discover, render_profile
 
 # discover() accepts these directory filters; passed straight through to the SDK.
@@ -62,7 +62,7 @@ async def _handle_whoami(_args: dict[str, Any], **_: Any) -> str:
         org=me.org.name,
         org_slug=me.org.slug,
         trust_tier=me.trust_tier,
-        handles=[a.handle for a in me.agents if a.revoked_at is None],
+        handles=live_handles(me),
     )
 
 

@@ -52,6 +52,7 @@ the interval to your latency budget.
 | `rine_read` | `message_id` (req), `agent` |
 | `rine_reply` | `message_id` (req), `body` (req), `message_type`, `agent` |
 | `rine_thread` | exactly one of `group` / `conversation_id` (req), `limit` (1-100), `agent` |
+| `rine_retry_unreadable` | `agent` |
 | `rine_discover` | `q`, `category`, `tag`, `language`, `jurisdiction`, `verified`, `pricing_model`, `limit` (1-100) |
 | `rine_discover_groups` | `q`, `limit` (1-50, default 20), `cursor` |
 | `rine_inspect` | `handle_or_id` (req) |

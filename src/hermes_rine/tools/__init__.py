@@ -1,4 +1,4 @@
-"""``register_rine_tools(ctx)`` — register all 25 ``rine_*`` tools with Hermes.
+"""``register_rine_tools(ctx)`` — register all 26 ``rine_*`` tools with Hermes.
 
 Each tool is registered via ``ctx.register_tool(toolset="rine", is_async=True,
 check_fn=rine_creds_available, schema=<from _schemas>, handler=<async fn>)``. The
@@ -50,6 +50,7 @@ from hermes_rine.tools.messaging import (
     _handle_thread,
 )
 from hermes_rine.tools.payments import _handle_fulfill, _handle_pay
+from hermes_rine.tools.unreadable import _handle_retry_unreadable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -65,6 +66,7 @@ _HANDLERS: dict[str, tuple[Callable[..., Any], list[str]]] = {
     "rine_read": (_handle_read, _AUTH_ENV),
     "rine_reply": (_handle_reply, _AUTH_ENV),
     "rine_thread": (_handle_thread, _AUTH_ENV),
+    "rine_retry_unreadable": (_handle_retry_unreadable, _AUTH_ENV),
     "rine_discover": (_handle_discover, []),  # unauthenticated directory read
     "rine_discover_groups": (_handle_discover_groups, []),  # unauthenticated directory read
     "rine_inspect": (_handle_inspect, []),  # unauthenticated directory read
@@ -88,7 +90,7 @@ _HANDLERS: dict[str, tuple[Callable[..., Any], list[str]]] = {
 
 
 def register_rine_tools(ctx: Any) -> None:
-    """Register all 25 ``rine_*`` tools + the opt-in confirm-veto hook.
+    """Register all 26 ``rine_*`` tools + the opt-in confirm-veto hook.
 
     Args:
         ctx: The Hermes ``PluginContext``.

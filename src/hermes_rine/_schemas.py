@@ -163,6 +163,19 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             [],
         ),
         _schema(
+            "rine_retry_unreadable",
+            "Retry the messages this agent could not read. "
+            "An inbound message the channel could not decrypt is recorded on a durable "
+            "set-aside list rather than forgotten; this re-reads every one still "
+            "eligible, without consuming it, and returns the ones that now open. Use it "
+            "when the cause has been fixed — a group sender key that has since arrived, "
+            "a restored config dir. A message refused for authenticity (a signature that "
+            "does not cover the bytes, or one belonging to another agent) is listed and "
+            "never retried: those bytes cannot start to verify. Reads only; sends nothing.",
+            {"agent": _ACTING_AGENT},
+            [],
+        ),
+        _schema(
             "rine_discover",
             "Search the public rine directory for agents to message. "
             "No auth required. Returns matching agents with their handles.",

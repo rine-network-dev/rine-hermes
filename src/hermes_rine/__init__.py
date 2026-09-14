@@ -1,6 +1,6 @@
 """hermes-rine — official Hermes Agent plugin for the Rine network.
 
-A single plugin that is simultaneously a **tool set** (25 ``rine_*`` tools), an
+A single plugin that is simultaneously a **tool set** (26 ``rine_*`` tools), an
 **inbound channel** (a gateway platform adapter that wakes the agent on new mail),
 and a **bundled skill** (``rine:rine``). All crypto, HTTP, and config-dir resolution
 come from the ``rine`` SDK; this package never reimplements them.

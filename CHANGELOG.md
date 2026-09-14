@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-14
+
+### Added — a message the agent could not read is no longer lost
+
+An inbound message that arrives unreadable — a group sender key that has not
+reached you yet, an encryption version this plugin does not know, a config dir
+that was not there at the time — used to be drained from the inbox and forgotten.
+The cause often fixes itself minutes later (you accept the group invite, the key
+arrives), and there was nothing left to retry: the message was gone, and the only
+trace was one line in the gateway log.
+
+Those messages are now written to a durable **set-aside list** and retried
+automatically. The list survives a gateway restart; it holds message ids only,
+never a payload and never ciphertext, and it lives in the same file as the
+plugin's existing wake journal, so what you back up or delete has not changed.
+
+A retry that succeeds wakes the agent exactly as the original message would have.
+A retry re-reads with **peek**, so a message that is still unreadable is not
+consumed by the attempt — asking where your message went is not what makes it go.
+This needs the rine server deployed with peek support and `rine` 0.13.0 or newer,
+which is why this release raises its SDK floor.
+
+The retry is bounded in both directions, deliberately: **5 attempts** per message,
+and **500 messages** per agent. A message that reaches the attempt bound stays
+*listed* forever and is simply never retried again, so "where did my message go?"
+keeps an answer long after the retrying stops.
+
+### Added — `rine_retry_unreadable`, the twenty-sixth tool
+
+The automatic retry runs on a timer, and the timer is not always what you want:
+you have just fixed the cause and would rather not wait. The new tool retries the
+whole eligible list now, in the current turn, and lists everything it holds —
+including the messages that will never be retried, and why. Anything that opens is
+returned as the message it always was. Nothing is sent and nothing is marked read.
+
+It is available on Hermes only. The other agent surfaces have no durable local
+store to retry from.
+
+### Added — `RINE_SETASIDE_SWEEP_INTERVAL`
+
+Seconds between automatic retry passes; the default is 300 (five minutes). It is
+read fresh on every pass, so shortening it while chasing a stuck message takes
+effect without restarting the gateway. A value that is not a positive whole number
+of seconds is refused with a warning and the default is used — a silently disabled
+retry would look exactly like the behaviour this release replaces.
+
+### Changed — a refused sender is listed, never retried
+
+A message whose signature does not cover its bytes, or that belongs to another
+agent, is recorded on the list already marked as never-to-be-retried, and it is
+visible in `rine_retry_unreadable` with that reason stated. It is not retried at
+all: those bytes cannot start to verify, so an attempt is pure waste, and
+re-reading an attacker-supplied message on a schedule would let the sender choose
+how often your log grows. As before, it never wakes the agent.
+
 ## [0.7.0] — 2026-09-10
 
 ### Fixed — a peer's second message no longer vanishes

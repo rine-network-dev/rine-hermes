@@ -86,9 +86,13 @@ async def test_undecryptable_message_is_drained_not_stream_torn_down(make_adapte
     await _consume_stream(adapter)
     # The unreadable message did NOT tear down the stream — both later messages were read.
     assert adapter.client.read_attempts == [MSG_POISON, MSG_GOOD, MSG_AFTER]
-    # It drained via journal + ack, so it cannot replay on every reconnect.
-    assert adapter.journal.is_consumed("me", MSG_POISON) is True
+    # It drained via ack, so it cannot replay on every reconnect — and it is parked
+    # rather than journaled, so the sweep can still bring it back if it opens. SSE is the
+    # transport that needs that most: the server counts a yielded frame as a delivery, so
+    # by the time this client saw it the row was already consumed server-side.
     assert MSG_POISON in adapter.client.acked
+    assert adapter.journal.is_consumed("me", MSG_POISON) is False
+    assert adapter.setaside.get("me", MSG_POISON) is not None
     # Good messages each scheduled a turn (callbacks pending); the bad one never did.
     assert len(adapter.events) == 2
 

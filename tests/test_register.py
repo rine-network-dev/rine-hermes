@@ -1,7 +1,7 @@
 """``register(ctx)`` wiring tests.
 
 A fake ``PluginContext`` (``RecordingCtx``) captures every registration call so we can
-assert the plugin wires exactly 25 tools + 1 skill + 1 platform (+ the opt-in
+assert the plugin wires exactly 26 tools + 1 skill + 1 platform (+ the opt-in
 ``pre_tool_call`` hook), and that nothing touches the network at import or register
 time. ``register()`` only runs inside a Hermes process, so the Hermes-internal modules
 it imports are resolved from the rig (or the conftest doubles on a bare host).
@@ -24,6 +24,7 @@ _EXPECTED_TOOLS = [
     "rine_read",
     "rine_reply",
     "rine_thread",
+    "rine_retry_unreadable",
     "rine_discover",
     "rine_discover_groups",
     "rine_inspect",
@@ -59,9 +60,9 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", original)
 
 
-def test_register_records_twenty_five_tools(fake_ctx):
+def test_register_records_twenty_six_tools(fake_ctx):
     hermes_rine.register(fake_ctx)
-    assert len(fake_ctx.tools) == 25
+    assert len(fake_ctx.tools) == 26
 
 
 def test_register_tool_names_match_the_contract(fake_ctx):
@@ -247,10 +248,32 @@ def test_each_tool_schema_is_an_openai_function_dict(fake_ctx):
         assert schema["parameters"]["type"] == "object"
 
 
+def test_no_tool_schema_when_registered_then_peek_is_not_model_settable(fake_ctx):
+    """Peek is this plugin's decision about a row it could not open, never the model's.
+
+    A model that can ask for a read which consumes nothing can walk the whole inbox and
+    leave every row ``new`` — the one state an operator reads as "nothing arrived here".
+    The set-aside sweep and ``rine_retry_unreadable`` peek on the plugin's own reasoning
+    about what it failed to decrypt, and nothing else pins the absence: a ``peek``
+    property would read as an ordinary schema addition and every other test would stay
+    green.
+    """
+    hermes_rine.register(fake_ctx)
+    # Guards the guard: a registry whose schemas carry no properties at all would
+    # otherwise satisfy the loop below vacuously.
+    with_properties = [
+        tool for tool in fake_ctx.tools if tool["schema"]["parameters"].get("properties")
+    ]
+    assert len(with_properties) > 20
+    for tool in fake_ctx.tools:
+        properties = tool["schema"]["parameters"].get("properties", {})
+        assert "peek" not in properties, f"{tool['name']} lets the model decide whether to peek"
+
+
 def test_register_touches_no_network(fake_ctx, no_network):
     # The socket guard raises if register() opens a connection.
     hermes_rine.register(fake_ctx)
-    assert len(fake_ctx.tools) == 25
+    assert len(fake_ctx.tools) == 26
 
 
 def test_importing_hermes_rine_exposes_version_and_register():

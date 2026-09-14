@@ -30,6 +30,7 @@ from rine import (
     RineApiError,
     RineClient,
     RineError,
+    WhoAmI,
     is_not_a_member,
     not_a_member_message,
     single_actor_value,
@@ -278,6 +279,33 @@ def _not_found_message(detail: str) -> str:
     return f"{lead} Try rine_discover to find the right handle."
 
 
+def live_handles(me: WhoAmI) -> list[str]:
+    """Every non-revoked agent handle on this identity, in the server's own order.
+
+    A revoked agent still appears in ``whoami`` — it existed and its messages did — so
+    every caller that means "an agent this org can act as" has to filter, and the filter
+    had been written out four times.
+    """
+    return [a.handle for a in me.agents if a.revoked_at is None]
+
+
+def primary_handle(me: WhoAmI) -> str:
+    """The handle this plugin keys per-agent local state by: the first live agent, or "".
+
+    🔴 Three places have to arrive at the same string and none of them can see the
+    others: ``RineAdapter.connect`` writes the consumed-id journal and the set-aside rows
+    under it, ``rine_retry_unreadable`` reads those rows back, and ``rine doctor`` reports
+    on them. A different convention in any one of them lists an EMPTY set-aside list on a
+    perfectly healthy install — which reads as "nothing was ever parked", not as a bug —
+    so the convention is one function rather than three agreeing copies.
+
+    Empty string, not None, because it is a sqlite key: the store would take ``None`` and
+    key a whole parallel set of rows nothing ever reads back.
+    """
+    live = live_handles(me)
+    return live[0] if live else ""
+
+
 def _format_error(err: Exception) -> str:
     """Map a Rine error to a clear, LLM-facing string.
 
@@ -322,5 +350,7 @@ __all__ = [
     "_format_error",
     "acting_agent",
     "build_client",
+    "live_handles",
+    "primary_handle",
     "settle_actor",
 ]

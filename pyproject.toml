@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-rine"
-version = "0.7.0"
-description = "Official Hermes Agent plugin for the Rine network — 25 rine_* tools (incl. x402 pay/fulfill), an inbound wake channel, and a bundled skill for E2E-encrypted agent-to-agent messaging, groups, and payments"
+version = "0.8.0"
+description = "Official Hermes Agent plugin for the Rine network — 26 rine_* tools (incl. x402 pay/fulfill), an inbound wake channel, and a bundled skill for E2E-encrypted agent-to-agent messaging, groups, and payments"
 readme = "README.md"
 license = "EUPL-1.2"
 requires-python = ">=3.11,<3.14"
@@ -27,12 +27,17 @@ dependencies = [
     # inject the editable local ./rine-sdk over this floor (compose.hermes.yml).
     # hermes-agent is NOT a runtime dependency: the rig supplies it on PYTHONPATH;
     # `import hermes_rine` and `python -m hermes_rine.onboard` work without it.
-    # Floor is 0.11.0, and it is the first floor here that is NOT documentation-grade —
-    # it is a hard import requirement. This plugin imports names the SDK first exported
-    # in 0.11.0 (`single_actor_value`, `may_vote`, `vote_eligibility_reason`,
+    # Floor is 0.13.0, and it is not documentation-grade — it is a hard runtime
+    # requirement on two counts. (1) Import: this plugin imports names the SDK first
+    # exported in 0.11.0 (`single_actor_value`, `may_vote`, `vote_eligibility_reason`,
     # `describe_mls_admission`, `mls_admission_skip_sentence` among others), so against
-    # 0.10.0 `import hermes_rine` raises ImportError at module scope. Lower this floor
-    # and the plugin does not fail a call — it fails to load.
+    # 0.10.0 `import hermes_rine` raises ImportError at module scope — it does not fail
+    # a call, it fails to load. (2) Behaviour: the set-aside retry (`_setaside`,
+    # `rine_retry_unreadable`) re-reads a parked message with `read(..., peek=True)`,
+    # which 0.13.0 is the first SDK to accept. Against an older SDK that keyword is a
+    # TypeError inside the sweep; worse, an SDK that silently dropped it would have every
+    # retry CONSUME the message it is trying to recover. Lower this floor and the feature
+    # inverts.
     #
     # 0.11.0 also inherits 0.10.0's reason for existing: it is at or above the first
     # rine whose send path fetches the recipient's signing key fresh instead of reading
@@ -42,7 +47,7 @@ dependencies = [
     # its recipient — nothing in this plugin can detect or retry that. Signing
     # (rine_pay) needs the SDK's `payments` extra (eth-account) — the rig installs
     # `rine[payments]`; a real install that pays must too.
-    "rine>=0.11.0",
+    "rine>=0.13.0",
     "pydantic>=2.0",
 ]
 
@@ -152,6 +157,7 @@ module = [
     "hermes_rine._outbound",
     "hermes_rine._poll",
     "hermes_rine._sse",
+    "hermes_rine._sweep",
     "hermes_rine.tools.messaging",
     "hermes_rine.tools.discovery",
     "hermes_rine.tools.groups",
@@ -159,6 +165,7 @@ module = [
     "hermes_rine.tools.groups_list",
     "hermes_rine.tools.groups_reclaim",
     "hermes_rine.tools.payments",
+    "hermes_rine.tools.unreadable",
 ]
 warn_return_any = false
 disable_error_code = ["no-any-return", "misc"]

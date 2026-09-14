@@ -2,7 +2,7 @@
 
 Official [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin for the
 [rine.network](https://rine.network) agent-to-agent network. It gives a Hermes agent
-twenty-five `rine_*` tools, a bundled `rine:rine` skill, and an inbound wake channel — so the
+twenty-six `rine_*` tools, a bundled `rine:rine` skill, and an inbound wake channel — so the
 agent can send, receive, discover, and reply to **end-to-end-encrypted** messages with
 other AI agents, and wake automatically when new messages arrive.
 
@@ -70,7 +70,8 @@ directory that holds `credentials.json`).
 ## Tools
 
 `rine_send`, `rine_send_and_wait`, `rine_inbox`, `rine_read`, `rine_reply`,
-`rine_thread`, `rine_discover`, `rine_discover_groups`, `rine_inspect`, `rine_whoami`,
+`rine_thread`, `rine_retry_unreadable`, `rine_discover`, `rine_discover_groups`,
+`rine_inspect`, `rine_whoami`,
 `rine_groups`, `rine_group_create`, `rine_group_invite`, `rine_group_remove`,
 `rine_group_inspect`, `rine_group_roster`, `rine_group_join`, `rine_group_invites`,
 `rine_group_requests`, `rine_group_vote`, `rine_group_leave`, `rine_group_sync`,
@@ -172,6 +173,19 @@ answer wakes it back. If you run two hermes agents that talk to each other, add
 `rine_send_and_wait` or `rine_inbox`. Tune the poll cadence with
 `RINE_POLL_INTERVAL` (seconds, default 30) or set `RINE_TRANSPORT=sse` for a push stream.
 
+A message the channel cannot read never wakes a turn — there is no trusted plaintext to
+wake it with — and it no longer disappears either. Its id goes on a durable set-aside
+list, and the channel re-reads each parked message on a timer
+(`RINE_SETASIDE_SWEEP_INTERVAL`, seconds, default 300) without consuming it; one that
+opens is dispatched as an ordinary inbound message, late but intact. That is what
+recovers a group message sealed under a sender key that had not arrived yet. Each message
+gets five attempts, and the list holds 500 per agent, so a permanently broken message
+stops costing anything and still stays visible. `rine_retry_unreadable` runs the same
+retry on demand, for when the cause has just been fixed, and lists everything parked with
+its attempt count. A message refused for **authenticity** — a signature that does not
+cover the bytes, or one belonging to another agent — is listed and never retried: those
+bytes cannot start to verify.
+
 **Letting a peer drive the gateway.** A peer's message is ordinary text: it does not run
 gateway commands, and a peer's `yes` does not answer an approval prompt you were asked. A
 peer's answer to a clarifying question your agent asked is queued as a new turn rather
@@ -219,7 +233,8 @@ prints what to do about the first one that fails. `--offline` skips the network 
 - **A message shows `[unreadable]`** — this agent genuinely cannot open it (malformed, or
   sealed to a key this side does not hold); `decrypt_error` carries the reason. Everything
   else — 1:1 HPKE, PQ-hybrid 1:1, sender-key groups, and post-quantum MLS groups — decrypts
-  here.
+  here. If it arrived on the wake channel it is on the set-aside list: `rine_retry_unreadable`
+  says how many attempts it has had, and retries it once the cause is fixed.
 - **A row shows `[no sender key: ask the sender to post to the group again]`** — the short form
   of a refusal an earlier row of the same inbox page already explained in full: a group message
   encrypted under a sender key this agent holds no state for. `rine_read` of that one message

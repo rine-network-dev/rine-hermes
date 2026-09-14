@@ -129,7 +129,7 @@ def _authenticates(config_dir: str | None) -> Check:
         with client:
             me = client.whoami()
     except Exception as err:  # noqa: BLE001 — report the reason rather than a traceback
-        from hermes_rine._client import _format_error
+        from hermes_rine._client import _format_error, live_handles
 
         return Check(
             "wake channel",
@@ -138,7 +138,7 @@ def _authenticates(config_dir: str | None) -> Check:
             "The wake channel authenticates exactly this way on connect, so it will fail "
             "the same way until this does.",
         )
-    handles = [a.handle for a in me.agents if a.revoked_at is None]
+    handles = live_handles(me)
     if not handles:
         return Check(
             "wake channel",

@@ -2,6 +2,10 @@
 
 ``_dispatch(adapter, msg)`` is the single decision point both transports use (poll
 here, SSE in ``_sse``) so the wake/dedupe/verify/ack policy lives in exactly one place.
+It returns a :class:`DispatchOutcome` saying which of three things it did, because the
+set-aside sweep (:mod:`hermes_rine._sweep`) has to tell "handled it" from "declined it"
+— see that class for why a sweep that could not tell them apart had no bound at all.
+
 For one decrypted inbound message it, in order:
 
 1. **self-skip** — a message from the agent's own handle never wakes it, with one
@@ -18,11 +22,17 @@ For one decrypted inbound message it, in order:
    them but belongs to an agent other than the row's sender, comes back with
    ``verification_status`` ``"invalid"`` / ``"sender-mismatch"``. Both are **logged at
    WARNING** (the security-relevant audit trail), then **drained (journal + ack)** so
-   they never replay. They are **never** dispatched.
-4. **decrypt_error** (any other) — genuinely unreadable (malformed / unsupported version):
-   same drain (journal + ack), logged at INFO. Never dispatched: ciphertext / unreadable
-   payload must not reach the agent. Draining (not "leave new") is deliberate — a
-   real inbox with an unverifiable backlog would otherwise re-quarantine every poll.
+   they never replay, and **listed on the set-aside list already exhausted** so an
+   operator can see what was refused. They are **never** dispatched and never retried.
+4. **decrypt_error** (any other) — genuinely unreadable (malformed, unsupported version,
+   a group sender key that has not arrived yet): **acked but NOT journaled**, logged at
+   INFO, and recorded on the durable **set-aside list** (``_setaside``) instead. Never
+   dispatched: ciphertext / unreadable payload must not reach the agent. Acking (not
+   "leave new") is deliberate — a real inbox with an unverifiable backlog would otherwise
+   re-quarantine every poll — and the set-aside row is what keeps it recoverable:
+   :func:`hermes_rine._sweep._sweep_loop` re-reads it with **peek** on a tick
+   (bounded attempts), and
+   ``rine_retry_unreadable`` does the same on demand.
 5. **unverifiable** — dispatched with an ``[unverified sender]`` note, unless
    ``RINE_REQUIRE_VERIFIED=1`` blocks it.
 6. **already consumed** — a redelivered, already-journaled id is **re-acked** (so it
@@ -77,6 +87,7 @@ import functools
 import inspect
 import logging
 import os
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from rine import MessageType, is_authenticity_failure
@@ -86,15 +97,44 @@ from hermes_rine._format import render_message_body
 from hermes_rine._gateway_control import optional_event_kwargs
 from hermes_rine._outbound import ERROR_TYPE
 from hermes_rine._payer import maybe_auto_pay
+from hermes_rine._setaside import SetAsideReason
 from hermes_rine._turns import InboundTurn
 from hermes_rine._x402 import is_x402, x402_wake_body
 
 if TYPE_CHECKING:
     from rine import DecryptedMessage
 
+    from hermes_rine._setaside import SetAsideRow
     from hermes_rine.adapter import RineAdapter
 
 logger = logging.getLogger("hermes_rine.poll")
+
+
+class DispatchOutcome(Enum):
+    """What :func:`_dispatch` did with one message. The set-aside sweep keys off it.
+
+    ``HANDLED`` — the message reached its terminal handling: a turn was scheduled, or it
+    was drained (journal + ack), or it was a redelivery that only needed re-acking. There
+    is nothing left to retry, so the sweep drops its set-aside row.
+
+    ``PARKED`` — it could not be read, so this call recorded it on the set-aside list,
+    which **already spent an attempt on it**. A caller must not count a second one.
+
+    ``DEFERRED`` — declined without handling it and without recording anything: a policy
+    refusal (self-send, a disallowed sender, strict-mode ``unverifiable``) or a turn that
+    is already in flight. The message stays eligible.
+
+    🔴 ``DEFERRED`` is why this type exists. Every one of those refusals re-decides the
+    same way on every tick, and none of them touches the store — so a sweep that re-read
+    such a row without spending an attempt would re-read it for the life of the install,
+    oldest-first, starving every newer row behind it. That is the log/IO storm
+    :mod:`hermes_rine._setaside` was chosen to prevent, reintroduced by the retry.
+    """
+
+    HANDLED = "handled"
+    PARKED = "parked"
+    DEFERRED = "deferred"
+
 
 # Inbound types that close an exchange rather than open one, so they never wake a turn.
 # Matches the rine channel Eve ships (rine-eve/src/channel.ts): an error notice and a
@@ -219,22 +259,29 @@ def _session_key_for(adapter: RineAdapter, source: Any) -> str:
     )
 
 
-async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
-    """Apply the full wake/dedupe/verify/ack policy to one inbound message."""
+async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> DispatchOutcome:
+    """Apply the full wake/dedupe/verify/ack policy to one inbound message.
+
+    Returns which of the three :class:`DispatchOutcome` things it did, so the set-aside
+    sweep can drop a row it finished, leave the attempt it already spent alone, or count
+    one against a refusal that would otherwise repeat forever. The poll and SSE
+    transports ignore the return: for them every inbound row is new and the verdict adds
+    nothing.
+    """
     message_id = str(msg.id)
     sender = _sender_handle(msg)
 
     # 1. Never wake on our own outbound copy — EXCEPT a Funnel webhook, which the relay
     #    legitimately self-sends as the agent (``from == to``) and must wake on.
     if sender and sender == adapter.agent_handle and not _is_funnel_webhook(msg):
-        return
+        return DispatchOutcome.DEFERRED
 
     # 2. Allowlist: quarantine-LOG a disallowed sender, never silently drop.
     if adapter.allowed_handles is not None and sender not in adapter.allowed_handles:
         logger.warning(
             "rine wake: quarantined message %s from disallowed sender %r", message_id, sender
         )
-        return
+        return DispatchOutcome.DEFERRED
 
     # 2b. Terminal type: drain it (journal + ack) without waking a turn, so an exchange
     #     that has already closed cannot restart itself.
@@ -246,58 +293,85 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
         )
         _safe_journal(adapter, message_id)
         await _ack(adapter, message_id)
-        return
+        return DispatchOutcome.HANDLED
 
     if msg.decrypt_error:
-        # 3/4. Never wake on an unreadable message (no trusted plaintext). DRAIN it
-        #      (journal + ack) so it cannot wedge the poll loop. A *refused sender*
-        #      (forged signature, or one belonging to another agent) is logged at
-        #      WARNING — the security-relevant audit trail — while other unreadable
-        #      causes (malformed / unsupported version) log at INFO. Ciphertext is NEVER
-        #      surfaced either way. The two are told apart by the SDK's own
-        #      ``is_authenticity_failure`` rather than by the error prose, so the audit
-        #      trail stays honest when the SDK rewords a message and a verdict added to
-        #      ``VerificationStatus`` is classified the day it ships.
+        # 3/4. Never wake on an unreadable message (no trusted plaintext), and never
+        #      leave it ``new``: DRAIN it (ack) so it cannot wedge the poll loop. A
+        #      *refused sender* (forged signature, or one belonging to another agent) is
+        #      logged at WARNING — the security-relevant audit trail — while other
+        #      unreadable causes (malformed, unsupported version, a group sender key that
+        #      has not arrived yet) log at INFO. Ciphertext is NEVER surfaced either way.
+        #      The two are told apart by the SDK's own ``is_authenticity_failure`` rather
+        #      than by the error prose, so the audit trail stays honest when the SDK
+        #      rewords a message and a verdict added to ``VerificationStatus`` is
+        #      classified the day it ships.
+        #
+        #      What the drain no longer does is FORGET it. The id goes on the
+        #      durable set-aside list first, and the sweep below retries it.
+        #
         #      NB: an earlier design left refused senders ``new`` for an "operator
-        #      sweep", but a real inbox with an unverifiable backlog re-quarantines them
-        #      every poll forever (a log/IO storm); draining + a loud WARNING is the
-        #      correct, contained policy. The message is never dispatched, so this in no
-        #      way weakens the "never wake on an untrusted message" invariant.
-        if is_authenticity_failure(msg.verification_status):
+        #      sweep", and that diagnosis still stands — a real inbox with an
+        #      unverifiable backlog would re-quarantine them every poll forever (a
+        #      log/IO storm). The set-aside list answers that objection rather than
+        #      reversing it: the message is still acked, so the poll loop never offers it
+        #      again, and what retries it is a LOCAL row carrying an attempt counter and
+        #      a hard bound — the one thing the rejected design lacked. The message is
+        #      never dispatched from here, so this in no way weakens the "never wake on
+        #      an untrusted message" invariant.
+        #
+        #      🔴 The transient arm must NOT journal. ``_safe_journal`` marks the id
+        #      *consumed*, and step 6 turns that into "re-ack only, never dispatch" — so
+        #      journaling here would make a message that later became readable
+        #      permanently undispatchable, which is the exact bug the set-aside list fixes. The
+        #      record lands BEFORE the ack (``_journal``'s record-before-ack discipline):
+        #      a crash in that window leaves the message un-acked and the next poll parks
+        #      it again through the idempotent upsert.
+        reason = setaside_reason(msg)
+        if reason is SetAsideReason.AUTHENTICITY:
             logger.warning(
                 "rine wake: message %s refused (%s); not dispatching, draining (journal + ack)",
                 message_id,
                 msg.verification_status,
             )
-        else:
-            logger.info(
-                "rine wake: message %s unreadable (%s); not dispatching, draining",
-                message_id,
-                msg.decrypt_error,
-            )
-        _safe_journal(adapter, message_id)
+            # Listed, never retried: bytes a signature does not cover cannot start to
+            # verify, and re-presenting an attacker-controlled message on a schedule is a
+            # log amplifier whose cadence the attacker picks. Journaled, because a refusal
+            # IS the final handling of this message.
+            _safe_setaside(adapter, message_id, reason, exhausted=True)
+            _safe_journal(adapter, message_id)
+            await _ack(adapter, message_id)
+            # HANDLED, not PARKED: the row exists for the operator to read, but a refusal
+            # is this message's final handling and nothing will retry it.
+            return DispatchOutcome.HANDLED
+        logger.info(
+            "rine wake: message %s unreadable (%s); set aside for retry",
+            message_id,
+            msg.decrypt_error,
+        )
+        _safe_setaside(adapter, message_id, reason)
         await _ack(adapter, message_id)
-        return
+        return DispatchOutcome.PARKED
 
     # 5. Unverifiable: blocked under strict mode, else dispatched with a marker.
     if msg.verification_status == "unverifiable" and adapter.require_verified:
         logger.warning(
             "rine wake: message %s unverifiable and RINE_REQUIRE_VERIFIED=1; skipping", message_id
         )
-        return
+        return DispatchOutcome.DEFERRED
 
     # 6. Exactly-once: a redelivered, already-recorded id is re-acked, not re-dispatched.
     if adapter.journal.is_consumed(adapter.agent_handle, message_id):
         logger.debug("rine wake: message %s already consumed; re-acking only", message_id)
         await _ack(adapter, message_id)
-        return
+        return DispatchOutcome.HANDLED
 
     # 7. In-flight: a prior poll already scheduled this id's turn (the poll interval can be
     #    shorter than a turn, so the server still shows it ``new``). Skip — no double-wake,
     #    no re-ack: the in-flight turn's post-delivery callback will journal + ack it.
     if message_id in adapter.turns:
         logger.debug("rine wake: message %s already in-flight; skipping", message_id)
-        return
+        return DispatchOutcome.DEFERRED
 
     # 8. Build the event and schedule the turn; journal + ack only AFTER it completes.
     is_group = bool(msg.group_handle or msg.group_id)
@@ -312,7 +386,7 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
         logger.info("rine wake: message %s auto-paid (x402); draining", message_id)
         _safe_journal(adapter, message_id)
         await _ack(adapter, message_id)
-        return
+        return DispatchOutcome.HANDLED
 
     # One wake carries exactly one message, so this is a single-message render: a
     # fresh refusal explains a missing sender key in full rather than marking it.
@@ -368,6 +442,8 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> None:
             message_id,
             exc_info=True,
         )
+        return DispatchOutcome.DEFERRED
+    return DispatchOutcome.HANDLED
 
 
 def _safe_journal(adapter: RineAdapter, message_id: str) -> None:
@@ -380,6 +456,52 @@ def _safe_journal(adapter: RineAdapter, message_id: str) -> None:
             message_id,
             exc_info=True,
         )
+
+
+def setaside_reason(msg: DecryptedMessage) -> SetAsideReason:
+    """Why an unreadable message is being parked — the retry policy turns on this.
+
+    A *refused sender* (``"invalid"`` / ``"sender-mismatch"``) is ``AUTHENTICITY`` and is
+    never retried: bytes a signature does not cover cannot start to verify later. Every
+    other cause (malformed, an unsupported version, a group sender key that has not
+    arrived yet) is ``UNREADABLE`` and may heal, so it is worth a bounded retry.
+
+    The split comes from the SDK's own :func:`rine.is_authenticity_failure` rather than
+    the error prose, so it stays honest when the SDK rewords a message and classifies a
+    verdict added to ``VerificationStatus`` the day it ships. Shared with
+    :mod:`hermes_rine._sweep`, which re-classifies on every re-read — a row parked as
+    merely unreadable that comes back *forged* must stop being retried, and one whose
+    peer simply has not rotated yet must not be written off as an attack.
+    """
+    if is_authenticity_failure(msg.verification_status):
+        return SetAsideReason.AUTHENTICITY
+    return SetAsideReason.UNREADABLE
+
+
+def _safe_setaside(
+    adapter: RineAdapter,
+    message_id: str,
+    reason: SetAsideReason,
+    *,
+    exhausted: bool = False,
+) -> SetAsideRow | None:
+    """Park an unreadable id for retry; a store failure degrades to today's forget-it.
+
+    Returns the row as written, or None when the write failed — :mod:`hermes_rine._sweep`
+    reads its ``attempts``/``exhausted`` to log the give-up once, so the counter it
+    reports is the one the store actually committed rather than a locally guessed one.
+    """
+    try:
+        return adapter.setaside.record(
+            adapter.agent_handle, message_id, reason, exhausted=exhausted
+        )
+    except Exception:  # noqa: BLE001 — store write failed: log, drain anyway (no retry)
+        logger.warning(
+            "rine wake: set-aside write failed for %s; it will not be retried",
+            message_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _build_event(
@@ -435,4 +557,10 @@ async def _poll_loop(adapter: RineAdapter) -> None:
         await asyncio.sleep(adapter.poll_interval)
 
 
-__all__ = ["_dispatch", "_poll_loop", "ignored_inbound_types"]
+__all__ = [
+    "DispatchOutcome",
+    "_dispatch",
+    "_poll_loop",
+    "ignored_inbound_types",
+    "setaside_reason",
+]

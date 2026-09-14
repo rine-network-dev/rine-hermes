@@ -56,6 +56,7 @@ def _adapter(client: FakeConnectClient):
     adapter._poll_interval = 3600
     adapter._agent_handle = ""
     adapter._listen_task = None
+    adapter._sweep_task = None
     adapter._running = False
     # ``connect`` announces the gateway-control posture, so these three are part of what
     # it reads. This is what ``__init__`` produces from an unset environment: control off,
@@ -112,6 +113,7 @@ async def test_failed_auth_reports_failure_without_leaving_a_listener() -> None:
 
     assert await adapter.connect() is False
     assert adapter._listen_task is None
+    assert adapter._sweep_task is None
 
 
 @pytest.mark.parametrize("transport", ["poll", "sse"])
@@ -124,5 +126,42 @@ async def test_connect_is_idempotent_for_either_transport(transport: str) -> Non
         await adapter.connect(is_reconnect=True)
         await asyncio.sleep(0)
         assert first.cancelled() or first.done()
+    finally:
+        await adapter._stop_listener()
+
+
+async def test_connect_spawns_the_setaside_sweep_and_stop_cancels_it() -> None:
+    # The retry runs ON A TICK, not on demand only. The tick is its
+    # own task because ``_sse_loop`` sits inside ``_consume_stream`` for hours without
+    # returning, so a sweep folded into the listener's loop body would never fire on the
+    # transport that needs it most. Mutation guard: drop the ``create_task(_sweep_loop)``
+    # from ``connect`` and the first assertion goes red; drop the sweeper from
+    # ``_stop_listener`` and the last one does.
+    adapter = _adapter(FakeConnectClient())
+    try:
+        assert await adapter.connect() is True
+        sweeper = adapter._sweep_task
+        assert sweeper is not None
+        assert not sweeper.done()
+        assert sweeper is not adapter._listen_task
+    finally:
+        await adapter._stop_listener()
+    assert adapter._sweep_task is None
+    assert sweeper.cancelled() or sweeper.done()
+
+
+async def test_reconnecting_leaves_exactly_one_sweep_running() -> None:
+    # Same hazard as the listener: two sweepers on one inbox re-read every parked id twice
+    # per tick and race each other's ``forget``.
+    adapter = _adapter(FakeConnectClient())
+    try:
+        await adapter.connect()
+        first = adapter._sweep_task
+        await adapter.connect(is_reconnect=True)
+        second = adapter._sweep_task
+        await asyncio.sleep(0)
+        assert second is not first
+        assert first.cancelled() or first.done()
+        assert not second.done()
     finally:
         await adapter._stop_listener()

@@ -20,6 +20,7 @@ import pytest
 
 from hermes_rine._outbound import should_relay
 from hermes_rine._poll import _dispatch
+from hermes_rine._setaside import SetAsideReason
 
 from .conftest import RecordingClient
 
@@ -237,14 +238,24 @@ async def test_duplicate_inbound_after_turn_dispatches_once(make_adapter, make_m
     assert adapter.client.acked == [str(msg.id), str(msg.id)]
 
 
-async def test_decrypt_error_never_dispatched_but_journaled_acked(make_adapter, make_message):
+async def test_decrypt_error_never_dispatched_but_acked_and_set_aside(make_adapter, make_message):
+    # Genuinely unreadable: acked immediately (no turn to wait on) and parked for retry.
+    # 🔴 It must NOT be journaled. The journal means *handled*, and step 6 turns a
+    # journaled id into "re-ack only, never dispatch" — so journaling here would make the
+    # message permanently undispatchable the moment it became readable, which is the whole
+    # failure the set-aside list fixes. This assertion is the mutation guard for that: restore the
+    # ``_safe_journal`` call on this arm and it goes red.
     adapter = make_adapter()
     msg = make_message(plaintext=None, decrypt_error="MLS unsupported")
     await _dispatch(adapter, msg)
     assert adapter.events == []  # ciphertext never surfaced
-    # Genuinely unreadable: journaled + acked immediately (no turn to wait on).
-    assert adapter.journal.is_consumed("me", str(msg.id)) is True
+    assert adapter.journal.is_consumed("me", str(msg.id)) is False
     assert adapter.client.acked == [str(msg.id)]
+    row = adapter.setaside.get("me", str(msg.id))
+    assert row is not None
+    assert row.reason is SetAsideReason.UNREADABLE
+    assert row.exhausted is False
+    assert row.attempts == 1
 
 
 @pytest.mark.parametrize(
@@ -276,6 +287,15 @@ async def test_refused_sender_never_dispatched_and_logged_as_a_warning(
     assert adapter.events == []  # never dispatched (security invariant)
     assert adapter.journal.is_consumed("me", str(msg.id)) is True  # drained: journaled
     assert adapter.client.acked == [str(msg.id)]  # drained: acked
+    # Listed so an operator can see WHAT was refused, and already exhausted so nothing
+    # ever re-reads it: a signature that does not cover the bytes cannot start to, and a
+    # scheduled re-presentation of an attacker-controlled message is a log amplifier the
+    # attacker picks the cadence of. Mutation guard for the ``exhausted=True`` argument.
+    row = adapter.setaside.get("me", str(msg.id))
+    assert row is not None
+    assert row.reason is SetAsideReason.AUTHENTICITY
+    assert row.exhausted is True
+    assert adapter.setaside.due("me") == []
     [record] = [r for r in caplog.records if r.name == "hermes_rine.poll"]
     assert record.levelname == "WARNING"
     assert status in record.getMessage()
@@ -299,7 +319,8 @@ async def test_unreadable_message_is_drained_at_info_not_as_a_security_warning(
         await _dispatch(adapter, msg)
 
     assert adapter.events == []
-    assert adapter.journal.is_consumed("me", str(msg.id)) is True  # still drained
+    assert adapter.client.acked == [str(msg.id)]  # still drained
+    assert adapter.setaside.get("me", str(msg.id)) is not None  # and still recoverable
     [record] = [r for r in caplog.records if r.name == "hermes_rine.poll"]
     assert record.levelname == "INFO"
 
@@ -378,8 +399,8 @@ async def test_undecryptable_x402_frame_still_drained_not_woken(make_adapter, ma
     )
     await _dispatch(adapter, msg)
     assert adapter.events == []  # never woken on ciphertext
-    assert adapter.journal.is_consumed("me", str(msg.id)) is True  # drained
-    assert adapter.client.acked == [str(msg.id)]
+    assert adapter.client.acked == [str(msg.id)]  # drained
+    assert adapter.setaside.get("me", str(msg.id)) is not None  # parked, not forgotten
 
 
 async def test_non_x402_message_still_dispatched(make_adapter, make_message):

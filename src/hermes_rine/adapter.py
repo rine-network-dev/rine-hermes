@@ -29,7 +29,7 @@ from gateway.platforms.base import (  # type: ignore[import-not-found]
     SendResult,
 )
 
-from hermes_rine._client import _format_error, build_client
+from hermes_rine._client import _format_error, build_client, primary_handle
 from hermes_rine._gateway_control import (
     ALLOW_ENV,
     HANDLES_ENV,
@@ -40,6 +40,7 @@ from hermes_rine._gateway_control import (
 )
 from hermes_rine._journal import ConsumedJournal
 from hermes_rine._outbound import notify_failure, route_reply
+from hermes_rine._setaside import SetAsideStore
 from hermes_rine._turns import InboundTurns
 
 if TYPE_CHECKING:
@@ -67,6 +68,15 @@ def _parse_allowed_handles(raw: str) -> set[str] | None:
     if not handles or _ALLOW_ALL_HANDLES in handles:
         return None
     return handles
+
+
+async def _cancel(task: asyncio.Task[None] | None) -> None:
+    """Cancel and await one background task, if there is one."""
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 class RineAdapter(BasePlatformAdapter):
@@ -98,8 +108,13 @@ class RineAdapter(BasePlatformAdapter):
         self._gateway_control_handles = parse_control_handles(os.getenv(HANDLES_ENV, ""))
         self._client: RineClient | None = None
         self._journal = ConsumedJournal()
+        # The unreadable messages this agent has parked. Shares the journal's
+        # file on its own connection; a separate TABLE, because "could not read it" is
+        # the opposite of the journal's "handled it" — see :mod:`hermes_rine._setaside`.
+        self._setaside = SetAsideStore()
         self._agent_handle = ""
         self._listen_task: asyncio.Task[None] | None = None
+        self._sweep_task: asyncio.Task[None] | None = None
         # Turns a rine message woke that are scheduled but not finished: the wake guard
         # (no double-dispatch while a turn runs) and the context every outbound decision
         # reads. Opened by ``_poll._dispatch``, closed by the post-delivery callback.
@@ -119,6 +134,11 @@ class RineAdapter(BasePlatformAdapter):
     def journal(self) -> ConsumedJournal:
         """The durable consumed-id journal."""
         return self._journal
+
+    @property
+    def setaside(self) -> SetAsideStore:
+        """The durable set-aside list of messages this agent could not read."""
+        return self._setaside
 
     @property
     def agent_handle(self) -> str:
@@ -183,6 +203,7 @@ class RineAdapter(BasePlatformAdapter):
         """
         from hermes_rine._poll import _poll_loop
         from hermes_rine._sse import _sse_loop
+        from hermes_rine._sweep import _sweep_loop
 
         await self._stop_listener()
         try:
@@ -191,8 +212,7 @@ class RineAdapter(BasePlatformAdapter):
             logger.error("[rine] connect failed: %s", _format_error(err))
             return False
 
-        live = [a.handle for a in me.agents if a.revoked_at is None]
-        self._agent_handle = live[0] if live else ""
+        self._agent_handle = primary_handle(me)
         self._running = True
         # Say the gateway-control posture out loud here rather than per message: a knob
         # that is half-configured is off, and a user who set one of its two halves and
@@ -204,28 +224,37 @@ class RineAdapter(BasePlatformAdapter):
         )
         loop = _sse_loop if self._transport == "sse" else _poll_loop
         self._listen_task = asyncio.create_task(loop(self))
+        # The set-aside retry runs on its own tick, NOT inside the listener: ``_sse_loop``
+        # sits in ``_consume_stream`` for hours without returning, and SSE is the
+        # transport that needs the retry most (a yielded frame is already a delivery
+        # server-side). One task per connect, torn down with the listener.
+        self._sweep_task = asyncio.create_task(_sweep_loop(self))
         logger.info(
             "[rine] connected as %s (transport=%s)", self._agent_handle or "?", self._transport
         )
         return True
 
     async def _stop_listener(self) -> None:
-        """Cancel and await the transport listener task, if one is running."""
-        if self._listen_task is None:
-            return
-        self._listen_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._listen_task
+        """Cancel and await the background tasks (transport listener + set-aside sweep).
+
+        Both are cancelled together because both are spawned together by ``connect``,
+        and a sweep left running against a disconnected adapter would keep re-reading
+        parked ids on a timer with nothing to dispatch them to.
+        """
+        await _cancel(self._listen_task)
         self._listen_task = None
+        await _cancel(self._sweep_task)
+        self._sweep_task = None
 
     async def disconnect(self) -> None:
-        """Stop the listener, close the client + journal."""
+        """Stop the background tasks, close the client + journal + set-aside store."""
         self._running = False
         await self._stop_listener()
         if self._client is not None:
             await self._client.close()
             self._client = None
         self._journal.close()
+        self._setaside.close()
         logger.info("[rine] disconnected")
 
     def pop_post_delivery_callback(

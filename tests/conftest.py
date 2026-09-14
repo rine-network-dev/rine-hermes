@@ -678,16 +678,22 @@ def group_payload(
 
 
 class RecordingClient:
-    """A fake ``RineClient`` recording the ids passed to ``mark_delivered``.
+    """A fake ``RineClient`` recording the ids passed to ``mark_delivered`` and ``read``.
 
     ``fail_ack`` makes the first ``mark_delivered`` raise (to test that a failed ack
-    neither journals nor loses a message). Only ``mark_delivered`` is exercised by
-    the dispatch path; reads/sends go through the tools, not here.
+    neither journals nor loses a message). ``read`` exists because the set-aside sweep
+    re-reads a parked id through the adapter's own client (the tools build their own),
+    and it records the ``peek`` flag it was called with: whether the retry consumes the
+    message it is recovering is the whole point of that keyword, so a test asserts on it
+    rather than trusting it. ``reads`` is keyed by id so a test states the answer per
+    message; ``read_calls`` is the call log.
     """
 
     def __init__(self, *, fail_ack: bool = False) -> None:
         self.acked: list[str] = []
         self.fail_ack = fail_ack
+        self.reads: dict[str, object] = {}
+        self.read_calls: list[tuple[str, bool]] = []
 
     async def mark_delivered(self, ids: list[str]) -> int:
         if self.fail_ack:
@@ -695,6 +701,20 @@ class RecordingClient:
             raise RuntimeError("simulated ack failure")
         self.acked.extend(ids)
         return len(ids)
+
+    async def read(
+        self, message_id: str, *, peek: bool = False, agent: str | None = None
+    ) -> object:
+        """Answer a sweep re-read from ``reads``; an absent id is a server 404."""
+        self.read_calls.append((str(message_id), peek))
+        answer = self.reads.get(str(message_id))
+        if answer is None:
+            from rine import NotFoundError
+
+            raise NotFoundError("message not found")
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 class _FakeConfig:
@@ -743,9 +763,22 @@ class FakeAdapter:
     ``handle_message`` returns.
     """
 
-    def __init__(self, journal: object, *, agent_handle: str = "me", **opts: object) -> None:
+    def __init__(
+        self,
+        journal: object,
+        *,
+        agent_handle: str = "me",
+        setaside_path: str,
+        **opts: object,
+    ) -> None:
         self.client = RecordingClient(fail_ack=bool(opts.get("fail_ack", False)))
         self.journal = journal
+        # A REAL ``SetAsideStore`` on the same per-test sqlite file as the journal —
+        # the production shape (one file, two tables), and the table's own semantics
+        # (bounds, exhaustion, eviction) are what several dispatch assertions read.
+        from hermes_rine._setaside import SetAsideStore
+
+        self.setaside = SetAsideStore(setaside_path)
         self.agent_handle = agent_handle
         self.allowed_handles = opts.get("allowed_handles")
         self.require_verified = bool(opts.get("require_verified", False))
@@ -880,7 +913,12 @@ def make_adapter(tmp_path):
     def _make(**opts: object) -> FakeAdapter:
         journal = ConsumedJournal(str(tmp_path / "journal.sqlite"))
         agent_handle = str(opts.pop("agent_handle", "me"))
-        return FakeAdapter(journal, agent_handle=agent_handle, **opts)
+        return FakeAdapter(
+            journal,
+            agent_handle=agent_handle,
+            setaside_path=str(tmp_path / "journal.sqlite"),
+            **opts,
+        )
 
     return _make
 
