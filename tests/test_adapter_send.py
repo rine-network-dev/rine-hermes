@@ -37,6 +37,10 @@ from hermes_rine._turns import InboundTurn, InboundTurns
 from .conftest import OTHER_HANDLE, SELF_HANDLE
 
 FINAL = {"notify": True}
+# Hermes’ own operator prompt, verbatim as the operator saw it arrive at a peer.
+HOME_CHANNEL_NOTICE = (
+    "📬 No home channel is set for Rine. Type /sethome to make this chat your home."
+)
 GROUP = "#ops@myorg.rine.network"
 
 
@@ -81,8 +85,15 @@ def _adapter(agent_handle: str, client: FakeSendClient):
 
 
 def _woken_by(adapter, chat_id: str, message_type: str = "rine.v1.dm", **kwargs) -> str:
-    """Open an in-flight turn for ``chat_id``, as ``_poll._dispatch`` does on a wake."""
+    """Open an in-flight turn for ``chat_id``, as ``_poll._dispatch`` does on a wake.
+
+    ``session_key`` defaults to one derived from the chat, which is the property these
+    outbound tests actually depend on: two turns in the same chat share a key and two in
+    different chats do not, exactly as the host's ``build_session_key`` arranges. Pass it
+    explicitly to pin a specific key.
+    """
     message_id = str(uuid4())
+    kwargs.setdefault("session_key", f"agent:main:rine:dm:{chat_id}")
     adapter.turns.begin(
         message_id, InboundTurn(chat_id=chat_id, message_type=message_type, **kwargs)
     )
@@ -170,13 +181,27 @@ async def test_home_channel_notice_reaches_the_peer_when_no_turn_is_running() ->
     client = FakeSendClient()
     adapter = _adapter(SELF_HANDLE, client)
 
-    res = await adapter.send(
-        OTHER_HANDLE,
-        "📬 No home channel is set for Rine. Type /sethome to make this chat your home.",
-    )
+    res = await adapter.send(OTHER_HANDLE, HOME_CHANNEL_NOTICE)
 
     assert res.success is True
-    assert len(client.sent) == 1
+    assert client.sent == [(OTHER_HANDLE, {"text": HOME_CHANNEL_NOTICE})]
+
+
+async def test_home_channel_notice_is_not_relayed_inside_a_woken_turn() -> None:
+    # The case the operator actually hit: a peer messages the agent, and the FIRST thing
+    # that comes back is Hermes asking the peer to type /sethome. connect() now seeds
+    # RINE_HOME_CHANNEL so the notice is never generated (test_adapter_connect.py), but
+    # that closes the source, not this boundary — a host that emits an operator prompt
+    # for some other reason still must not have it billed to a peer as a real message.
+    client = FakeSendClient()
+    adapter = _adapter(SELF_HANDLE, client)
+    _woken_by(adapter, OTHER_HANDLE)
+
+    res = await adapter.send(OTHER_HANDLE, HOME_CHANNEL_NOTICE)
+
+    assert res.success is True
+    assert client.sent == []
+    assert client.replied == []
 
 
 async def test_a_send_to_another_peer_during_a_woken_turn_is_relayed() -> None:

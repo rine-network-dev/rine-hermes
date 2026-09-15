@@ -37,8 +37,10 @@ RUN uv python install 3.11
 # `git rev-parse v2026.9.7` yields the TAG object, not this commit — always pin the commit.
 # Editable install into the named-volume venv happens in the entrypoint (first run).
 #
-# 🔴 The rig pin and the advertised floor are DIFFERENT NUMBERS, deliberately. `pyproject.toml`
-# floors users at v2026.8.31 / 0.21.0 — the oldest release whose behaviour we make claims about —
+# 🔴 The rig pin and the advertised floor are DIFFERENT NUMBERS, deliberately. `README.md`
+# floors users at v2026.8.31 / 0.21.0 — the oldest release whose behaviour we make claims about;
+# it is stated there and NOT in `pyproject.toml`, which declares no hermes-agent dependency at
+# all (the host supplies it on PYTHONPATH) —
 # while this rig tests against the newest, so upstream drift surfaces here before it reaches a
 # user. Raising the pin does not raise the floor; that is a separate, stated decision.
 # Previous pin: 29112bef099274229cadff79cdff7bf7b99c4b77 (v2026.8.31, 0.21.0 — the floor).

@@ -70,10 +70,21 @@ It fires last, after every post-turn send the gateway makes, which is also what 
 Hermes' human-facing crash text inside Hermes. ``RineAdapter.pop_post_delivery_callback``
 is what makes the gateway hand it back at all — see the method for why.
 
-**Known v0.1 edge case:** two inbound from the same sender in flight share a session key;
-``register_post_delivery_callback`` *chains* callbacks for the same key and the pop is
-one-shot, so both fire after whichever turn completes next. Acceptable for v0.1 (distinct
-A2A conversations dominate); documented, not over-engineered.
+**Two inbound from the same sender share a session key**, and the gateway keys callbacks
+by session while firing one per completed turn without saying which completed. Upstream
+*chains* same-key registrations and the pop is one-shot, so registering a callback per
+message means both fire when the first turn ends — closing a turn that has not run yet.
+That is not a bookkeeping nicety: a closed turn is invisible to every outbound decision,
+so its interim narration is relayed to the peer as real, stored, billed, encrypted
+messages, its reply goes out mis-typed, and an x402 frame loses prose suppression. This
+was shipped and live through ``hermes-rine`` 0.8.0.
+
+So exactly ONE callback is registered per session key, and it closes the session's oldest
+open turn, re-registering while any remain (``_turns.oldest_for_session`` / ``has_session``
+— Hermes runs same-session turns serially, so oldest-first is completion order). Declining
+the second message instead would be wrong: ``adapter.connect`` selects the SSE loop or the
+poll loop **exclusively**, and an SSE-yielded frame is already a delivery, so a message
+declined here is never re-offered on that transport.
 
 A dispatch (scheduling) failure closes the turn again and leaves the id **neither
 journaled nor acked**, so it stays eligible. The ciphertext is never read — only
@@ -399,24 +410,50 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> DispatchOutc
 
     event, source = _build_event(adapter, chat_id, is_group, body, msg, sender)
 
+    session_key = _session_key_for(adapter, source)
+
     async def on_complete() -> None:
         """Post-delivery: record (journal) BEFORE ack, each step failure-isolated.
 
-        Runs only after the agent turn completes durably (Hermes fires it post-turn).
-        A journal write failure degrades that single message to at-least-once (logged
+        Runs only after an agent turn completes durably (Hermes fires it post-turn). A
+        journal write failure degrades that single message to at-least-once (logged
         WARNING) without aborting anything; the ack is already best-effort. The turn is
         always closed, releasing the wake guard, the remembered inbound type and any x402
         prose suppression (so a later unrelated send to this chat is never swallowed).
         Never raises out.
-        """
-        try:
-            _safe_journal(adapter, message_id)
-            await _ack(adapter, message_id)
-        finally:
-            adapter.turns.end(message_id)
 
-    session_key = _session_key_for(adapter, source)
-    adapter.register_post_delivery_callback(session_key, on_complete)
+        🔴 It closes the session's OLDEST open turn, not the message this dispatch was
+        built for. The gateway keys callbacks by session and fires one per completed turn
+        without saying which completed, so a callback that closed ``message_id``
+        unconditionally would close the wrong turn the moment a peer sends twice — ending
+        a turn that has not run yet, which strips its interim-narration suppression, its
+        reply type and its x402 suppression. Hermes runs same-session turns serially and
+        the registry preserves insertion order, so oldest-first IS completion order. The
+        fallback to ``message_id`` covers only the already-closed case (a scheduling
+        failure raced this callback), where journal+ack are idempotent anyway.
+
+        Re-registers itself while the session still has an open turn, because the pop is
+        one-shot. That is safe against upstream's *chaining* registration precisely
+        because it runs after the pop — the slot is empty when it re-fills it, so our
+        entries never chain with each other.
+        """
+        target = adapter.turns.oldest_for_session(session_key) or message_id
+        try:
+            _safe_journal(adapter, target)
+            await _ack(adapter, target)
+        finally:
+            adapter.turns.end(target)
+            if adapter.turns.has_session(session_key):
+                adapter.register_post_delivery_callback(session_key, on_complete)
+
+    # One callback per session, never one per message. Upstream CHAINS same-key
+    # registrations (``gateway/platforms/base.py`` ``register_post_delivery_callback``)
+    # and the pop is one-shot, so a second registration means both fire when whichever
+    # turn finishes first does — closing the second turn before it runs. Deferring the
+    # second message instead is NOT an option: ``adapter.py`` selects the SSE loop or the
+    # poll loop exclusively, and an SSE-yielded frame is already a delivery, so a message
+    # declined here would never be re-offered on that transport.
+    session_already_registered = adapter.turns.has_session(session_key)
 
     # Open the turn: its chat marks this chat as already answering (so the gateway's
     # interim narration stays inside Hermes while a cron delivery to another peer still
@@ -430,13 +467,23 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> DispatchOutc
     # unmarked outbound sends for the life of the process.
     adapter.turns.begin(
         message_id,
-        InboundTurn(chat_id=chat_id, message_type=msg.type, x402=frame_is_x402),
+        InboundTurn(
+            chat_id=chat_id,
+            message_type=msg.type,
+            session_key=session_key,
+            x402=frame_is_x402,
+        ),
     )
+    if not session_already_registered:
+        adapter.register_post_delivery_callback(session_key, on_complete)
     try:
         await adapter.handle_message(event)
     except Exception:  # noqa: BLE001 — scheduling failed: close the turn, leave re-eligible
         adapter.turns.end(message_id)
-        adapter.pop_post_delivery_callback(session_key)
+        # Only reclaim the callback if no sibling turn is still relying on it — popping a
+        # session another message is mid-turn on would strand that turn permanently.
+        if not adapter.turns.has_session(session_key):
+            adapter.pop_post_delivery_callback(session_key)
         logger.error(
             "rine wake: handle_message failed for %s; leaving re-eligible",
             message_id,

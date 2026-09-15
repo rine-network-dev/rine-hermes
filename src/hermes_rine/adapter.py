@@ -42,6 +42,7 @@ from hermes_rine._journal import ConsumedJournal
 from hermes_rine._outbound import notify_failure, route_reply
 from hermes_rine._setaside import SetAsideStore
 from hermes_rine._turns import InboundTurns
+from hermes_rine.platform import HOME_CHANNEL_ENV, NO_HOME_CHANNEL
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -213,6 +214,12 @@ class RineAdapter(BasePlatformAdapter):
             return False
 
         self._agent_handle = primary_handle(me)
+        # Close the ``/sethome`` prompt at its SOURCE rather than at our outbound boundary:
+        # with this set, the host never generates it. Rationale and why the value is a
+        # sentinel rather than a handle: :data:`hermes_rine.platform.NO_HOME_CHANNEL`. Here
+        # rather than in ``__init__`` only because a connect that never authenticated has no
+        # business writing the host's environment.
+        os.environ.setdefault(HOME_CHANNEL_ENV, NO_HOME_CHANNEL)
         self._running = True
         # Say the gateway-control posture out loud here rather than per message: a knob
         # that is half-configured is off, and a user who set one of its two halves and

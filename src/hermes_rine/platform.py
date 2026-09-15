@@ -43,6 +43,32 @@ _PLATFORM_HINT = (
 ALLOWED_HANDLES_ENV = "RINE_ALLOWED_HANDLES"
 ALLOW_ALL_ENV = "RINE_ALLOW_ALL_USERS"
 
+#: rine's home-channel variable, and the value ``connect`` seeds it with.
+#:
+#: Two independent host paths resolve this NAME and they agree, which is why seeding it
+#: works on a host that ignores our registration entirely: ``gateway/run.py``
+#: ``_home_target_env_var`` asks the plugin registry for the ``cron_deliver_env_var`` below
+#: and, failing that, derives ``f"{platform_name.upper()}_HOME_CHANNEL"`` — the same string.
+#:
+#: The value is a SENTINEL, not a destination, and that is load-bearing. ``gateway/run_turn.py``
+#: prompts "📬 No home channel is set for Rine… type /sethome" on the first message of a
+#: session whenever this reads empty, and delivers it through ``adapter.send`` — to whichever
+#: A2A peer happened to make first contact. A peer cannot type ``/sethome``, and the sentence
+#: fingerprints the host stack, so it is the line in the operator's report that most reads as
+#: "this product leaks its host". Our outbound rule drops it while a turn is in flight, but
+#: that is a content-blind catch at the boundary; a non-empty value here means the notice is
+#: never GENERATED.
+#:
+#: Why not this agent's own handle, which reads like the natural default: it is a resolvable
+#: rine destination, so a cron job configured ``deliver=rine`` with no home channel set would
+#: hit ``_outbound._is_self_addressed``, be skipped, and report ``success=True`` — the
+#: scheduler would log a delivery for a message that never left the box. ``-`` carries no
+#: ``@``, so it resolves to nothing, the send fails honestly, and the scheduler still falls
+#: back to standalone exactly as it does today. ``connect`` uses ``setdefault``, so an
+#: operator who set a real handle keeps it and cron delivery works for them unchanged.
+HOME_CHANNEL_ENV = "RINE_HOME_CHANNEL"
+NO_HOME_CHANNEL = "-"
+
 _ALLOW_EVERY_SENDER = "*"
 
 
@@ -135,7 +161,7 @@ def _wake_authorization_seed() -> dict[str, Any]:
 _OPTIONAL_ENTRY_KWARGS: dict[str, Any] = {
     "allowed_users_env": ALLOWED_HANDLES_ENV,
     "allow_all_env": ALLOW_ALL_ENV,
-    "cron_deliver_env_var": "RINE_HOME_CHANNEL",
+    "cron_deliver_env_var": HOME_CHANNEL_ENV,
     "apply_yaml_config_fn": _gateway_control.apply_yaml_config,
     "env_enablement_fn": _wake_authorization_seed,
 }

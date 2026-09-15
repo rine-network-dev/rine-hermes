@@ -599,3 +599,72 @@ async def test_journal_failure_in_callback_does_not_raise(make_adapter, make_mes
     await adapter.fire_post_delivery()  # must not raise
     assert adapter.client.acked == [str(msg.id)]  # ack still happened
     assert str(msg.id) not in adapter.turns  # in-flight mark still cleared
+
+
+async def test_second_message_from_one_peer_keeps_its_turn_open(make_adapter, make_message):
+    # Shipped live through hermes-rine 0.8.0: two inbound from the SAME peer share a
+    # session key, and the gateway keys post-delivery callbacks by session while firing one
+    # per completed turn without saying which completed. A callback per message therefore
+    # chained, and the first turn's completion closed BOTH turns — ending turn B before it
+    # had run. A closed turn is invisible to every outbound decision, so turn B then relayed
+    # its interim narration to the peer as real, stored, billed, encrypted messages and
+    # answered with the wrong type.
+    #
+    # Asserted through the public seams a user feels (relay suppression + reply type), not
+    # through the registry's internals.
+    adapter = make_adapter()
+    first = make_message(msg_type="rine.v1.dm")
+    second = make_message(msg_type="rine.v1.dm")
+
+    await _dispatch(adapter, first)
+    await _dispatch(adapter, second)
+
+    # Both turns are open, but only ONE callback exists — the second message rides the
+    # first registration rather than chaining a second one onto the same key.
+    assert str(first.id) in adapter.turns
+    assert str(second.id) in adapter.turns
+    assert len(adapter.registered_callbacks) == 1
+
+    # Turn A completes. It must close A and ONLY A.
+    await adapter.fire_post_delivery()
+    assert adapter.journal.is_consumed("me", str(first.id)) is True
+    assert adapter.client.acked == [str(first.id)]
+    assert str(first.id) not in adapter.turns
+
+    assert str(second.id) in adapter.turns, "turn B was closed before it ran"
+    assert adapter.journal.is_consumed("me", str(second.id)) is False
+    assert should_relay(adapter, "alice", None, None) is False, (
+        "turn B's interim narration would be relayed to the peer as real messages"
+    )
+    assert adapter.turns.message_type(str(second.id)) == "rine.v1.dm"
+
+    # The callback is re-armed, because the pop is one-shot and a turn is still open.
+    assert len(adapter.registered_callbacks) == 1
+
+    # Turn B completes. Now everything is closed and nothing is left registered.
+    await adapter.fire_post_delivery()
+    assert adapter.journal.is_consumed("me", str(second.id)) is True
+    assert adapter.client.acked == [str(first.id), str(second.id)]
+    assert str(second.id) not in adapter.turns
+    assert adapter.registered_callbacks == {}
+
+
+async def test_two_peers_get_independent_callbacks(make_adapter, make_message):
+    # The companion to the test above: the one-callback-per-session rule keys off the
+    # SESSION, so two different peers must still get one callback each. Guards against
+    # "fixing" the chaining bug by collapsing every turn onto a single shared callback,
+    # which would strand whichever peer did not complete first.
+    adapter = make_adapter()
+    from_alice = make_message(sender_handle="alice")
+    from_bob = make_message(sender_handle="bob")
+
+    await _dispatch(adapter, from_alice)
+    await _dispatch(adapter, from_bob)
+
+    assert len(adapter.registered_callbacks) == 2
+
+    await adapter.fire_post_delivery()
+    assert adapter.journal.is_consumed("me", str(from_alice.id)) is True
+    assert adapter.journal.is_consumed("me", str(from_bob.id)) is True
+    assert str(from_alice.id) not in adapter.turns
+    assert str(from_bob.id) not in adapter.turns

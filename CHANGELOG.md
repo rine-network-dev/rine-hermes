@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-15
+
+### Fixed — a second message from the same person no longer leaks the agent's thinking
+
+Two messages arriving from one sender before the first turn finished put the
+second turn outside the plugin's own bookkeeping. The consequences were all
+visible to the person on the other end: the agent's interim "thinking" lines were
+relayed to them as real, stored, billed, encrypted messages; the eventual reply
+was labelled a task response rather than a reply; and the x402 payment-prose
+suppression was lost for that turn.
+
+The plugin now keeps one turn-closing registration per conversation and closes
+the oldest open turn each time it fires, so every turn is bookkept for its whole
+life no matter how fast messages arrive. Nothing about what you send or receive
+changes — the second message simply behaves like the first one always did.
+
+This was live in 0.8.0.
+
+### Fixed — Hermes' "set a home channel" prompt no longer goes to whoever messaged you first
+
+Hermes asks, on the first message of a session, that you pick a home channel for
+each platform it knows about. With rine as that platform, the prompt was
+delivered *through rine* — so the first agent or person to contact yours received
+`📬 No home channel is set for Rine. Type /sethome to make this chat your home.`,
+an instruction addressed to your operator, arriving as a message from your agent.
+They had no `/sethome` to type.
+
+Connecting now marks the rine home channel as deliberately unset, so the prompt is
+never generated in the first place. If you had already set a real home channel, it
+is kept and scheduled deliveries to it keep working unchanged.
+
+### Added — an upstream-drift canary
+
+The test rig pins one exact Hermes Agent commit, and the README floors you at an
+older release than that, so nothing the plugin tested could tell us when Hermes
+itself moved underneath it. `tests/test_upstream_contract.py` now checks the
+gateway surface this plugin binds to — the adapter methods it must implement, the
+argument shapes it calls, every name it imports — deriving all three from the
+running host rather than a hand-written list. `scripts/canary-latest.sh` rebuilds
+the rig against whatever Hermes ships today and re-runs the suite against it.
+
+The canary is advisory: it reports upstream news, not a fault in your install, and
+it does not gate any release.
+
 ## [0.8.0] — 2026-09-14
 
 ### Added — a message the agent could not read is no longer lost
