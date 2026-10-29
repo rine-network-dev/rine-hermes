@@ -22,6 +22,7 @@ import httpx
 import pytest
 import respx
 from rine._constants import EncryptionVersion, MessageType
+from rine.x402 import read_daily_spent
 from rine.x402.types import X402_QUOTE_REF_KEY
 
 from hermes_rine._client import build_client
@@ -32,11 +33,13 @@ from .conftest import (
     AGENT_ID,
     API_URL,
     MESSAGE_ID,
+    OTHER_AGENT_ID,
     REPLY_ID,
+    hpke_self_blob,
     hpke_self_encrypt,
     message_payload,
     mock_agents,
-    mock_self_keys,
+    mock_recipient_keys,
     mock_token,
     sent_message_payload,
 )
@@ -122,13 +125,13 @@ def _mock_frame_and_reply(config_dir: str, payload: dict, msg_type: str):
     """Mock the GET (self-encrypted frame) + the in-thread reply POST; return the route."""
     mock_token()
     mock_agents()
-    mock_self_keys(config_dir)
+    mock_recipient_keys(AGENT_ID)
     ct = hpke_self_encrypt(config_dir, payload)
     respx.get(f"{API_URL}/messages/{MESSAGE_ID}").mock(
         return_value=httpx.Response(
             200,
             json=message_payload(
-                encryption_version=EncryptionVersion.HPKE_V1,
+                encryption_version=EncryptionVersion.HPKE_HYBRID_V2,
                 encrypted_payload=ct,
                 msg_type=msg_type,
             ),
@@ -150,9 +153,10 @@ def _mock_referenced_quote(config_dir: str):
         return_value=httpx.Response(
             200,
             json=message_payload(
-                encryption_version=EncryptionVersion.HPKE_V1,
+                encryption_version=EncryptionVersion.HPKE_HYBRID_V2,
                 encrypted_payload="ZHVtbXk=",  # the payer's copy — never opened here
-                self_encrypted_payload=hpke_self_encrypt(config_dir, _quote_payload()),
+                self_encrypted_payload=hpke_self_blob(config_dir, _quote_payload()),
+                to_agent_id=OTHER_AGENT_ID,
                 msg_id=QUOTE_ID,
                 msg_type=MessageType.X402_PAYMENT_REQUIRED,
                 direction="sent",
@@ -186,6 +190,25 @@ class TestPay:
         assert body["metadata"] == {MARKER_KEY: {"status": "payment-submitted", "rail": "x402"}}
         assert "10000" not in json.dumps(body["metadata"])
         assert EURC_SEPOLIA not in json.dumps(body["metadata"])
+
+    @respx.mock
+    async def test_pay_when_quote_sender_unverifiable_returns_sender_unverifiable(
+        self, config_dir
+    ):
+        _create_wallet(config_dir)
+        _save_policy(config_dir)
+        reply = _mock_frame_and_reply(
+            config_dir, _quote_payload(), MessageType.X402_PAYMENT_REQUIRED
+        )
+        respx.get(f"{API_URL}/agents/{AGENT_ID}/keys").mock(
+            return_value=httpx.Response(503, json={"detail": "key service unavailable"})
+        )
+
+        out = await _handle_pay({"message_id": MESSAGE_ID})
+
+        assert json.loads(out)["status"] == "sender-unverifiable"
+        assert not reply.called
+        assert read_daily_spent(config_dir, AGENT_ID) == 0
 
     @respx.mock
     async def test_pay_without_wallet_returns_no_wallet(self, config_dir):
@@ -333,6 +356,22 @@ class TestFulfill:
         assert body["metadata"] == {MARKER_KEY: {"status": "payment-failed", "rail": "x402"}}
 
     @respx.mock
+    async def test_fulfill_when_payment_sender_unverifiable_sends_nothing(self, config_dir):
+        reply = _mock_frame_and_reply(config_dir, _payment_payload(), MessageType.X402_PAYMENT)
+        respx.get(f"{API_URL}/agents/{AGENT_ID}/keys").mock(
+            return_value=httpx.Response(503, json={"detail": "key service unavailable"})
+        )
+        verify = respx.post(f"{FAC_URL}/verify")
+
+        out = await _handle_fulfill({"message_id": MESSAGE_ID, "facilitator_url": FAC_URL})
+
+        data = json.loads(out)
+        assert data["status"] == "sender-unverifiable"
+        assert data["settled"] is False
+        assert not verify.called
+        assert not reply.called
+
+    @respx.mock
     async def test_fulfill_wrong_type_returns_tool_error(self, config_dir):
         _mock_frame_and_reply(config_dir, {"text": "hello"}, "rine.v1.task_request")
 
@@ -387,6 +426,31 @@ class TestGatewayAutoPay:
 
         assert paid is True
         assert reply.called  # the sub-threshold quote was settled without a turn
+
+    @respx.mock
+    async def test_auto_pay_when_quote_sender_not_verified_declines_and_wakes(
+        self, config_dir, monkeypatch, make_message
+    ):
+        monkeypatch.setenv("RINE_X402_AUTO_PAY", "1")
+        _create_wallet(config_dir)
+        _save_policy(config_dir, threshold="1.00")
+        reply = _mock_frame_and_reply(
+            config_dir, _quote_payload(), MessageType.X402_PAYMENT_REQUIRED
+        )
+        msg = make_message(
+            message_id=UUID(MESSAGE_ID),
+            msg_type="rine.v1.x402_payment_required",
+            plaintext=json.dumps(_quote_payload()),
+            verification_status="sender-mismatch",
+            verified=False,
+        )
+
+        async with build_client() as client:
+            paid = await maybe_auto_pay(client, msg)
+
+        assert paid is False
+        assert not reply.called
+        assert read_daily_spent(config_dir, AGENT_ID) == 0
 
     @respx.mock
     async def test_auto_pay_above_threshold_declines_and_wakes(

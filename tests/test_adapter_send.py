@@ -427,11 +427,12 @@ async def test_x402_suppression_released_allows_a_later_reply() -> None:
 async def test_group_answer_broadcasts_instead_of_replying_to_one_member() -> None:
     # MEASURED (session 22): a group post has no single recipient (to_agent_id IS NULL), so
     # POST /messages/{id}/reply refuses it outright — 404 "Destination agent not found" for
-    # the poster's own org, 404 "Message not found" for every other member org, and ZERO
-    # reply rows are created. Threading a group answer would not deliver it privately to one
-    # member; it would fail the send and the group would hear nothing. A group answer is a
-    # broadcast. (messages.py's reply_is_group_carve_out branch looks like it files such a
-    # reply; it is unreachable, sitting after the recipient lookup that 404s.)
+    # the poster, 403 for a same-org sibling that did not write it, 404 "Message not found"
+    # for every other member org, and ZERO reply rows are created. Threading a group answer
+    # would not deliver it privately to one member; it would fail the send and the group would
+    # hear nothing. A group answer is a broadcast. (Behind those 404s the server's
+    # messages_reply_guards.refuse_group_post refuses any row carrying a group with 422; no
+    # reply to a group post is ever filed.)
     client = FakeSendClient()
     adapter = _adapter(SELF_HANDLE, client)
     inbound = _woken_by(adapter, GROUP, "rine.v1.dm")

@@ -1,12 +1,12 @@
 """Gating for the rine toolset: availability check + opt-in confirm-veto.
 
 Two cheap, network-free policies, both serving one rule: the toolset stays hidden until
-credentials resolve, and once they do, mutating tools run **unattended** — a confirm
+an identity resolves, and once it does, mutating tools run **unattended** — a confirm
 prompt is something an operator opts into, never the default.
 
 - ``rine_creds_available()`` is the toolset ``check_fn``. When it returns False the
   whole ``rine`` toolset is filtered out of the model's tool list. It only inspects
-  env vars and the config dir for a ``credentials.json`` — no network, no client.
+  the config dir for a ``profiles.json`` — no network, no client.
 - ``make_confirm_veto()`` returns a ``pre_tool_call`` callback that blocks mutating
   ``rine_*`` tools when ``RINE_REQUIRE_CONFIRM`` names them (default off, so one-shot /
   gateway-YOLO / E2E run unattended). A block is the dict
@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from rine import resolve_config_dir
+from rine import PROFILES_FILE, resolve_config_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,19 +43,17 @@ _MUTATING_TOOLS = frozenset(
 
 
 def rine_creds_available() -> bool:
-    """Return True if rine credentials are resolvable without a network call.
+    """Return True if a rine identity is resolvable without a network call.
 
-    True when either ``RINE_CLIENT_ID``+``RINE_CLIENT_SECRET`` are both set, or the
-    SDK's config-dir resolution lands on a directory holding a ``credentials.json``.
+    True when the SDK's config-dir resolution lands on a directory holding a
+    ``profiles.json``. The file holds no secret; the agent's keys sit beside it.
     Cheap and exception-safe — the registry caches the result ~30s.
     """
-    if os.getenv("RINE_CLIENT_ID") and os.getenv("RINE_CLIENT_SECRET"):
-        return True
     try:
         config_dir = resolve_config_dir()
     except Exception:  # noqa: BLE001 — resolution is best-effort; absence == unavailable
         return False
-    return os.path.isfile(os.path.join(config_dir, "credentials.json"))
+    return os.path.isfile(os.path.join(config_dir, PROFILES_FILE))
 
 
 def confirm_scope() -> frozenset[str]:

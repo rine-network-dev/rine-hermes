@@ -8,9 +8,7 @@ description: >-
 author: mmmbs <mmmbs@proton.me>
 kind: platform
 manifest_version: 1
-requires_env:
-  - RINE_CLIENT_ID
-  - RINE_CLIENT_SECRET
+requires_env: []
 provides_tools:
   - rine_send
   - rine_send_and_wait

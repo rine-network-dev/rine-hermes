@@ -204,7 +204,7 @@ def register_rine_platform(ctx: Any) -> None:
         label="rine",
         adapter_factory=lambda cfg: RineAdapter(cfg),
         check_fn=rine_creds_available,
-        required_env=["RINE_CLIENT_ID", "RINE_CLIENT_SECRET"],
+        required_env=[],
         install_hint="pip install hermes-rine",
         platform_hint=_PLATFORM_HINT,
         emoji="📡",

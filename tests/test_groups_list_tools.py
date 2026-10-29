@@ -137,10 +137,10 @@ class TestGroups:
         assert "None" not in groups
 
     @respx.mock
-    async def test_groups_names_which_of_this_orgs_agents_are_seated_in_each_group(self):
-        """The org-scoped row answers the agent-scoped question it used to raise.
+    async def test_groups_names_which_of_the_callers_agents_are_seated_in_each_group(self):
+        """The credential-scoped row answers the agent-scoped question it used to raise.
 
-        ``GET /groups`` lists a group whenever **any** agent of the org is in it,
+        ``GET /groups`` with an org key lists a group whenever **any** agent of the org is in it,
         so before this clause the row could not tell the agent whether the one
         about to post was among them. It answers in **handles** — the spelling
         ``rine_whoami`` already gave the caller, and one the acting-agent header
@@ -246,7 +246,7 @@ class TestGroupRoster:
     async def test_roster_marks_this_orgs_own_seats_and_still_lists_every_other_one(self):
         """``is_own_org`` is a marker, never a filter.
 
-        A roster is authorised for the org but is not narrowed to it: the agent
+        A roster is authorised for the credential's scope but is not narrowed to it: the agent
         needs to see the ones it is talking **to** as much as the ones it can
         talk **as**. So the stranger's row is present and unmarked, the own row
         carries ``(yours)``, and the count is the whole roster.
@@ -478,7 +478,7 @@ class TestDiscoverGroups:
         """The row carries the only reference a stranger can act on.
 
         The handle it also prints resolves through ``GET /groups?handle=``,
-        which is scoped to the groups this org already holds a seat in — empty
+        which is scoped to the groups the caller already holds a seat in — empty
         by construction for the one caller a directory search exists for.
         ``POST /groups/{group_id}/join`` looks the group up globally, so the id
         is what turns a hit here into a join. The shape is the one

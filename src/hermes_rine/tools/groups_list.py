@@ -37,7 +37,7 @@ from hermes_rine._format_groups import render_discover_groups, render_groups, re
 
 
 async def _handle_groups(args: dict[str, Any], **_: Any) -> str:
-    """List the groups the calling org's agents belong to (``rine_groups``)."""
+    """List the groups the calling key can see (``rine_groups``)."""
     try:
         acting = acting_agent(args)
         async with build_client(agent=acting) as client:

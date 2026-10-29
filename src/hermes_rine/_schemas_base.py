@@ -59,7 +59,7 @@ _GROUP_REF = _p(
 #: :data:`_GROUP_REF`.
 #:
 #: 🔴 **The rule itself is the SDK's, imported and never retyped.** ``join``'s
-#: reference rules are not the shared ones — a handle walks three rungs, and a
+#: reference rules are not the shared ones — a handle walks four rungs, and a
 #: bare name is read against this agent's pending invitations and nowhere wider,
 #: deliberately refusing a network-wide search that would feed an irreversible
 #: verb. All five connectors advertise the same rule, so it lives in
@@ -90,9 +90,9 @@ _GROUP_JOIN_REF = _p(
 #: tool result carries the warning saying so.
 #:
 #: "any call that acts or reads as one agent", not "every call": the three
-#: ORG-scoped group reads carry this property for uniformity and are never refused
+#: key-scoped group reads carry this property for uniformity and are never refused
 #: for ambiguity (``GET /groups`` and ``GET /groups/{id}/members`` authorise the
-#: calling org and take no acting-agent narrowing). Each of those three says so in
+#: calling key and take no acting-agent narrowing). Each of those three says so in
 #: its own description, which is where the exception belongs — naming them here
 #: would put a list that goes stale inside a constant twenty-one tools share.
 #: Those three carry no one-agent warning either: they answer for the whole org,

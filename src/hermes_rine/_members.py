@@ -24,7 +24,7 @@ guess is an irreversible eviction.
 
 The group argument on the same call is *resolved* from a bare name rather than
 refused (``_resolve_group_sync`` in the SDK), and that asymmetry is deliberate,
-not an oversight: ``/groups`` lists this org's groups, so a bare group name has
+not an oversight: ``/groups`` lists the groups the key can see, so a bare group name has
 one candidate here, while a roster spans every org that holds a seat, so a bare
 member name has as many candidates as there are orgs. Do not "align" the two —
 the populations differ, so the safe answer does too.

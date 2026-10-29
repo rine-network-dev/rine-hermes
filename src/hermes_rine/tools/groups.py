@@ -263,10 +263,10 @@ async def _handle_group_remove(args: dict[str, Any], **_: Any) -> str:
 async def _handle_group_inspect(args: dict[str, Any], **_: Any) -> str:
     """Show a group's details + its encryption mode (``rine_group_inspect``).
 
-    One of the three ORG-scoped reads, so it does NOT resolve the acting agent
+    One of the three key-scoped reads, so it does NOT resolve the acting agent
     up front and carries no one-agent warning: it answers about a group any
-    agent of the org may be seated in, ``agent`` narrows nothing in it, and a
-    line saying which agent "acted" would attribute an org-wide answer to one of
+    agent in the key's scope may be seated in, ``agent`` narrows nothing in it, and a
+    line saying which agent "acted" would attribute a key-wide answer to one of
     them. The value still reaches the wire as a header for uniformity, exactly
     as it did before.
 
@@ -280,7 +280,7 @@ async def _handle_group_inspect(args: dict[str, Any], **_: Any) -> str:
 
     Two refusals moved with the resolver, and both are the contract's rather
     than this file's: an unknown reference now carries the SDK's group refusal
-    (this org's groups by handle, then ``rine_discover_groups``) instead of a
+    (the groups your key can see, by handle, then ``rine_discover_groups``) instead of a
     sentence composed here, and a bare name answering to two groups is refused
     by name instead of resolving to whichever row ``GET /groups`` happened to
     list first.

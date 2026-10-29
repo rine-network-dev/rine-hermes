@@ -1,28 +1,24 @@
 """1:1 + group messaging handlers: send, send_and_wait, inbox, read, reply.
 
-Async handlers over the SDK's async ``RineClient``. Group messaging is not a separate
-tool — a ``to`` starting with ``#`` routes through ``_handle_send`` and group mail lands
-in the inbox/read path. Every handler wraps SDK calls in try/except and returns
-``tool_error(_format_error(err))`` — never a raw traceback, never ciphertext. On
-``rine_send`` that refusal also carries ``sent=False``, the negation of the key its
-success asserts, because the model reads the tool result and nothing else. The
-``tools.registry`` import is fine at module top: this file is only imported when
-``register()`` runs inside a Hermes process.
+Async handlers over the SDK's ``RineClient``. Group messaging is not a separate tool: a
+``to`` starting with ``#`` routes through ``_handle_send`` and group mail lands in the
+inbox/read path. Every handler wraps SDK calls in try/except and returns
+``tool_error(_format_error(err))``, never a raw traceback or ciphertext. ``rine_send``'s
+refusal also carries ``sent=False``, the negation of the key its success asserts, because
+the model reads only the tool result. The ``tools.registry`` import is fine at module top:
+this file is only imported when ``register()`` runs inside a Hermes process.
 
 All five take the optional ``agent`` the group tools take, wired the same way
-(:func:`hermes_rine._client.acting_agent` reads it, :func:`settle_actor` settles
-it, then both SDK levers). Settling before the verb rather than inside it is
-what puts the one-agent warning on the tool result instead of in an operator's
-log; in an org holding two agents an unnamed read is still refused rather than
-answered for the wrong inbox, and omitted it is the request a single-agent org
-already sent, byte for byte — ``settle_actor`` touches nothing when nothing was
-named, which is what keeps ``rine_send_and_wait``'s 1:1-only refusal local.
+(:func:`hermes_rine._client.acting_agent` reads it, :func:`settle_actor` settles it, then
+both SDK levers). Settling first puts the one-agent warning on the tool result, not in a
+log; an unnamed read in a two-agent org is refused rather than answered for the wrong
+inbox, and omitted it is the request a single-agent org already sent, byte for byte, which
+keeps ``rine_send_and_wait``'s 1:1-only refusal local.
 
-``GET /messages/{id}`` and ``POST /messages/{id}/reply`` authorise by ORG, so
-either verb reaches mail addressed to a sibling. Both act as the agent named
-here: a read moves that agent's own delivery mark and no sibling's, and a reply
-is filed from the agent that acted. Naming a sibling on ``rine_reply`` is refused
-by the SDK before anything is sent — the reply would arrive from an agent the
+``GET /messages/{id}`` and ``POST /messages/{id}/reply`` authorise by ORG, so either verb
+reaches mail addressed to a sibling. Both act as the agent named here: a read moves that
+agent's own delivery mark, and a reply is filed from the agent that acted. The SDK refuses
+a sibling on ``rine_reply`` before sending, as the reply would arrive from an agent the
 original never reached. Name the addressee on both.
 """
 
@@ -49,6 +45,7 @@ from hermes_rine._format import (
     render_single_message,
     render_thread,
 )
+from hermes_rine._tool_answers import TOOL_ANSWERS
 
 logger = logging.getLogger("hermes_rine.messaging")
 
@@ -120,6 +117,9 @@ async def _handle_send(args: dict[str, Any], **_: Any) -> str:
                 idempotency_key=args.get("idempotency_key"),
                 agent=acting,
             )
+            TOOL_ANSWERS.note_send(
+                str(msg.conversation_id), msg.group_handle, msg.recipient_handle
+            )
     except Exception as err:  # noqa: BLE001 — surface as a tool message, never crash
         # NEGATE the key the success asserts, don't just omit it. The host does
         # classify ``{"error": …}`` as a failure (``agent/display.py``
@@ -152,6 +152,11 @@ async def _handle_send_and_wait(args: dict[str, Any], **_: Any) -> str:
                 timeout=float(wait_seconds),
                 message_type=args.get("message_type", "rine.v1.task_request"),
                 agent=acting,
+            )
+            TOOL_ANSWERS.note_send(
+                str(result.sent.conversation_id),
+                result.sent.group_handle,
+                result.sent.recipient_handle,
             )
     except UnsupportedTargetError:
         return tool_error(_GROUP_ON_WAIT_MESSAGE)
@@ -258,6 +263,7 @@ async def _handle_reply(args: dict[str, Any], **_: Any) -> str:
                 message_type=args.get("message_type", "rine.v1.task_response"),
                 agent=acting,
             )
+            TOOL_ANSWERS.note_reply(str(args["message_id"]))
     except Exception as err:  # noqa: BLE001
         return tool_error(_format_error(err))
     return tool_result(**note, replied_to=args["message_id"], reply_id=str(reply.id))

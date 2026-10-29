@@ -25,15 +25,16 @@ from hermes_rine._setaside import SETASIDE_MAX_ATTEMPTS, SetAsideReason, SetAsid
 from hermes_rine.tools.unreadable import _handle_retry_unreadable
 
 from .conftest import (
+    AGENT_ID,
     API_URL,
     MESSAGE_ID,
     SELF_HANDLE,
     hpke_self_encrypt,
     message_payload,
     mock_agents,
-    mock_org,
-    mock_self_keys,
+    mock_recipient_keys,
     mock_token,
+    mock_whoami,
 )
 
 OTHER_MESSAGE_ID = "cccccccc-dddd-eeee-ffff-000000000009"
@@ -69,8 +70,8 @@ def seed():
 def _mock_identity(config_dir: str) -> None:
     mock_token()
     mock_agents()
-    mock_org()
-    mock_self_keys(config_dir)
+    mock_whoami()
+    mock_recipient_keys(AGENT_ID)
 
 
 def _readable(config_dir: str, text: str, msg_id: str = MESSAGE_ID):
@@ -78,7 +79,7 @@ def _readable(config_dir: str, text: str, msg_id: str = MESSAGE_ID):
         200,
         json=message_payload(
             msg_id=msg_id,
-            encryption_version=EncryptionVersion.HPKE_V1,
+            encryption_version=EncryptionVersion.HPKE_HYBRID_V2,
             encrypted_payload=hpke_self_encrypt(config_dir, {"text": text}),
         ),
     )
@@ -264,7 +265,7 @@ async def test_the_result_never_carries_ciphertext(config_dir, seed):
         return_value=httpx.Response(
             200,
             json=message_payload(
-                encryption_version=EncryptionVersion.HPKE_V1,
+                encryption_version=EncryptionVersion.HPKE_HYBRID_V2,
                 encrypted_payload=ciphertext,
             ),
         )

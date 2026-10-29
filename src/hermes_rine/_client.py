@@ -1,12 +1,12 @@
 """Shared config/auth resolver for hermes-rine.
 
 One place every tool + the adapter get their async ``RineClient`` from. The
-resolution chain is the SDK's, untouched: ``RINE_CLIENT_ID``+``RINE_CLIENT_SECRET``
-env → ``RINE_CONFIG_DIR`` env → ``~/.config/rine`` → ``cwd/.rine``. We do **not**
+resolution chain is the SDK's, untouched: ``RINE_CONFIG_DIR`` env → ``~/.config/rine``
+→ ``cwd/.rine``, the first directory holding a ``profiles.json``. We do **not**
 reimplement that chain — the SDK's ``RineClient`` resolves it when ``config_dir`` /
 ``api_url`` / ``agent`` are left at their defaults. This module only:
 
-- declares the chain via ``RINE_ENV_VARS`` (metadata for ``requires_env`` hints);
+- declares the chain via ``RINE_ENV_VARS`` (metadata for the operator);
 - builds an async ``RineClient`` lazily, passing only non-``None`` overrides;
 - maps typed ``RineError``s to clear LLM-facing strings (``_format_error``).
 
@@ -47,14 +47,10 @@ class RineEnvVar:
 
 
 # Declared so operators see which vars feed the SDK's resolution chain. All
-# optional — credentials may come from any rung (env creds → config dir). NO
+# optional — the runtime dir may come from any rung. There is no client id or secret to
+# set: an agent signs in with a key it holds in that dir. NO
 # RINE_TOKEN: the Python SDK has no such concept (Node/MCP-only); never accept it.
 RINE_ENV_VARS: list[RineEnvVar] = [
-    RineEnvVar(
-        name="RINE_CLIENT_ID",
-        description="Rine OAuth client id (hosted / secrets-manager auth).",
-    ),
-    RineEnvVar(name="RINE_CLIENT_SECRET", description="Rine OAuth client secret."),
     RineEnvVar(
         name="RINE_CONFIG_DIR",
         description="Override the Rine config dir (default ~/.config/rine then ./.rine).",
@@ -66,9 +62,9 @@ RINE_ENV_VARS: list[RineEnvVar] = [
     RineEnvVar(
         name="RINE_AGENT",
         description=(
-            "Which of the org's agents this deployment acts as (name, handle or UUID). "
-            "Only consulted when a tool call does not name one; an org with a single "
-            "agent never needs it."
+            "The agent this deployment acts as (name, handle or UUID). A config dir "
+            "holds one agent and an agent acts only as itself, so this is never needed "
+            "to choose; naming any other agent is refused."
         ),
     ),
 ]
@@ -83,10 +79,10 @@ def build_client(
     """Build an async ``RineClient``, passing only the non-``None`` overrides.
 
     Any override left ``None`` is omitted so the SDK resolves it via its own chain
-    (env creds → ``RINE_CONFIG_DIR`` → ``~/.config/rine`` → ``cwd/.rine``). Shared by
+    (``RINE_CONFIG_DIR`` → ``~/.config/rine`` → ``cwd/.rine``). Shared by
     every tool handler and the adapter — one contract, lazily invoked.
     """
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"agent_only": True}
     if config_dir is not None:
         kwargs["config_dir"] = config_dir
     if api_url is not None:
@@ -118,7 +114,7 @@ def acting_agent(args: dict[str, Any]) -> str | None:
 
     🔴 This returns what the caller **wrote**, never what it resolves to.
     :func:`settle_actor` is what turns it into a UUID and a warning; every verb
-    that acts as one agent goes through that pair, and the three ORG-scoped
+    that acts as one agent goes through that pair, and the three key-scoped
     group reads deliberately do not.
 
     The value still goes to :func:`build_client` as well, which is not a
@@ -156,11 +152,11 @@ async def settle_actor(client: RineClient, named: str | None) -> tuple[str | Non
     A surface that degrades its own clearest refusal to buy a warning nobody
     needed has made the measurement worse, not better.
 
-    🔴 The three ORG-scoped group reads — ``rine_groups``, ``rine_group_roster``
+    🔴 The three key-scoped group reads — ``rine_groups``, ``rine_group_roster``
     and ``rine_group_inspect`` — do not call this at all; they pass the raw
-    :func:`acting_agent` value straight down. They are authorised for the calling
-    org and ``agent`` narrows nothing they return, so nothing was ignored and no
-    agent "acted": a warning there would attribute an org-wide answer to one
+    :func:`acting_agent` value straight down. They are authorised for the
+    calling key and ``agent`` narrows nothing they return, so nothing was
+    ignored and no agent "acted": a warning there would attribute a key-wide answer to one
     agent and invite a retry that changes no byte of it.
     """
     if not named:
@@ -229,7 +225,7 @@ def _not_found_message(detail: str) -> str:
     org's agents by name, and that list is the answer. ``rine_discover`` reads
     the unauthenticated, org-agnostic public directory, so it cannot say which of
     the caller's own agents it may act as. A missing **group** is handed to
-    ``rine_groups`` first: it lists every group this org holds a seat in, public
+    ``rine_groups`` first: it lists every group the key can see, public
     and private alike, and a mistyped handle on a send is almost always a group
     the caller is already in. ``rine_discover_groups`` is named second because it
     searches the public directory only — the one place that finds a public group
@@ -238,7 +234,7 @@ def _not_found_message(detail: str) -> str:
     ``rine_discover`` is for.
 
     ``rine_groups`` is dropped when the refusal already carries that verb's own
-    answer. The SDK lists the org's groups inside its group refusals —
+    answer. The SDK lists the groups the key can see inside its group refusals —
     :data:`rine.GROUP_ROSTER_LEAD` introduces the roster, and
     :data:`rine.NO_GROUPS_IN_ORG` is the arm for an org that holds a seat
     nowhere — so naming ``rine_groups`` underneath one of those tells a caller
@@ -327,8 +323,8 @@ def _format_error(err: Exception) -> str:
     """
     if isinstance(err, AuthenticationError):
         return (
-            "Rine auth failed — set RINE_CLIENT_ID/RINE_CLIENT_SECRET or onboard "
-            "(`python -m hermes_rine.onboard`)."
+            "Rine auth failed — onboard (`python -m hermes_rine.onboard`). "
+            "A host clock more than 30 s off also fails sign-in."
         )
     if isinstance(err, NotFoundError):
         return _not_found_message(err.detail)

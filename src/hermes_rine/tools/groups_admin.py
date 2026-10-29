@@ -199,11 +199,13 @@ async def _handle_group_sync(args: dict[str, Any], **_: Any) -> str:
     A rine group runs one of two encryptions, so this verb has two answers and
     they share no field beyond ``regime``. An MLS group walks an epoch ladder,
     and which rung ran is the whole report: the cheap one replays stored commits
-    and posts nothing, the expensive one posts a single external commit that is
-    O(members) and billed to every member of the group. A sender-key group has
-    no epoch chain — what a member can be missing there is other members' keys,
-    waiting as distribution DMs in this agent's own inbox — so the report is how
-    many were installed, and nothing was committed.
+    and posts nothing itself, the expensive one posts a single external commit
+    that is O(members) and billed to every member of the group. Either rung ends
+    by moving this agent's own leaf to its current key, which can post one
+    path-only commit, and the report says where that leaf now stands. A
+    sender-key group has no epoch chain — what a member can be missing there is
+    other members' keys, waiting as distribution DMs in this agent's own inbox —
+    so the report is how many were installed, and nothing was committed.
 
     🔴 The branch is ``regime`` and never which fields the answer carries. An
     agent reading these keys gets the ones its group's encryption actually has,

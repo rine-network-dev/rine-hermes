@@ -38,6 +38,7 @@ from .conftest import (
     member_payload,
     mock_agents,
     mock_group_mls_init,
+    mock_mls_group_services,
     mock_token,
 )
 
@@ -132,6 +133,7 @@ class TestGroupCreate:
         """
         mock_token()
         mock_agents()
+        mock_mls_group_services(GROUP_ID, (AGENT_ID,))
         respx.post(f"{API_URL}/groups/{GROUP_ID}/mls/init").mock(
             return_value=httpx.Response(200, json={"members": []})
         )
@@ -1283,6 +1285,9 @@ class TestGroupJoin:
         respx.get(f"{API_URL}/groups/invites").mock(
             return_value=httpx.Response(200, json={"items": []})
         )
+        respx.get(f"{API_URL}/groups/org-joinable").mock(
+            return_value=httpx.Response(200, json={"id": None})
+        )
         respx.get(f"{API_URL}/directory/groups").mock(
             return_value=httpx.Response(
                 200, json={"items": [group_payload()], "total": 1, "next_cursor": None}
@@ -1313,6 +1318,9 @@ class TestGroupJoin:
         respx.get(f"{API_URL}/groups").mock(return_value=httpx.Response(200, json={"items": []}))
         respx.get(f"{API_URL}/groups/invites").mock(
             return_value=httpx.Response(200, json={"items": []})
+        )
+        respx.get(f"{API_URL}/groups/org-joinable").mock(
+            return_value=httpx.Response(200, json={"id": None})
         )
         respx.get(f"{API_URL}/directory/groups").mock(
             return_value=httpx.Response(200, json={"items": [], "total": 0, "next_cursor": None})
@@ -1543,3 +1551,9 @@ class TestGroupInvites:
         out = await _handle_group_invites({})
 
         assert json.loads(out)["invites"] == []
+
+
+@pytest.mark.parametrize("tool_id", ["rine_group_create", "rine_group_join"])
+def test_group_entry_tools_tell_the_agent_every_member_org_can_read_the_group(tool_id):
+    """The tools that put an agent into a group say who can read it."""
+    assert "Every member organisation can read this group" in SCHEMAS[tool_id]["description"]

@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from rine import (
+    GROUP_READERS_NOTICE,
     TRANSCRIPT_REFERENCE_REQUIRED,
     VOTE_DURATION_MAX_HOURS,
     VOTE_DURATION_MIN_HOURS,
@@ -219,7 +220,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "Create a new end-to-end-encrypted coordination group. Performs a real, "
             "irreversible network action. You own and administer the group. Groups are "
             "post-quantum MLS by default; open-enrollment groups run on sender keys. "
-            "visibility is required and has no default.",
+            "visibility is required and has no default. " + GROUP_READERS_NOTICE,
             {
                 "name": _p("string", "Group name (1-63 chars, DNS-safe)."),
                 "enrollment": _p(
@@ -341,9 +342,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "Show a group's details and encryption mode. "
             "The mode is post-quantum MLS, an MLS group "
             "still initialising, or sender-key. Every mode is readable and postable from "
-            "here. It resolves the group out of the same ORG-scoped list rine_groups "
-            "returns, so it reports a group's kind and never that the agent you name is "
-            "seated in it.",
+            "here. It resolves the group out of the same list of the groups your key can "
+            "see that rine_groups returns, so it reports a group's kind and never that "
+            "the agent you name is seated in it.",
             {"group": _GROUP_REF, "agent": _ACTING_AGENT},
             ["group"],
         ),
@@ -353,7 +354,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "on a nomination a member filed for this agent records this agent's consent to "
             "it and answers the request row; it does not join the group, because the "
             "electorate still has to carry the vote. Performs a real, irreversible network "
-            "action.",
+            "action. " + GROUP_READERS_NOTICE,
             {
                 "group": _GROUP_JOIN_REF,
                 "message": _p("string", "Optional message for a vote-gated join request."),
@@ -440,11 +441,13 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "It can post an external commit billed to every member, and reports what it "
             "cost. Run it when a group's messages stop decrypting. On "
             "an MLS group the cheap rung replays the commits the server still holds "
-            "and posts nothing; the expensive one posts a single external commit that "
-            "re-seats this agent's existing leaf, which is O(members) and billed to "
-            "every member of the group. A sender-key group has no epoch chain, so "
-            "there this installs the sender keys this agent is missing — the ones "
-            "waiting in its own inbox — and posts nothing. A group created to run "
+            "and posts nothing itself; the expensive one posts a single external commit "
+            "that re-seats this agent's existing leaf, which is O(members) and billed to "
+            "every member of the group. Either rung ends by moving this agent's own "
+            "leaf to its current key, which can post one path-only commit, and the "
+            "answer says where that leaf now stands. A sender-key group has no epoch "
+            "chain, so there this installs the sender keys this agent is missing — the "
+            "ones waiting in its own inbox — and posts nothing. A group created to run "
             "MLS whose ratchet tree was never founded runs sender keys too, so the "
             "same install happens and the answer additionally carries "
             "`mls_never_founded_note`, warning that the group has not got the MLS it "
@@ -479,7 +482,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "and sends it in-thread — a real, irreversible spend bounded by your spend "
             "policy (deny-by-default, per-tx/daily caps, permanent debit at signing). "
             "Returns a typed status: payment-submitted, no-wallet, not-payment-required, "
-            "policy-refused, above-auto-pay-threshold, already-paid, or wallet-busy. The "
+            "policy-refused, above-auto-pay-threshold, already-paid, wallet-busy, or "
+            "inauthentic-quote (the quote was not signed by the agent that sent it), or "
+            "sender-unverifiable (the sender check could not run; nothing was paid, retry "
+            "later). The "
             "agent named here is the one whose wallet is debited, and it must be the agent "
             "the quote was addressed to: naming another agent of the org spends that "
             "agent's funds on a payment the payee cannot verify or settle.",
@@ -511,7 +517,9 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "Settle a received x402 payment and return a receipt. Verifies the signed "
             "authorization, settles it on-chain through your configured facilitator, and "
             "threads the receipt back. A failed verification threads a failure receipt "
-            "(settled=false) rather than erroring. rine never custodies funds — settlement "
+            "(settled=false) rather than erroring. If the payment's sender cannot be checked "
+            "it returns status sender-unverifiable and settles and sends nothing; retry "
+            "later. rine never custodies funds — settlement "
             "is peer-to-peer through the facilitator you configure.",
             {
                 "message_id": _p("string", "UUID of the received x402 payment message."),

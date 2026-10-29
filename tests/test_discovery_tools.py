@@ -16,7 +16,7 @@ import respx
 
 from hermes_rine.tools.discovery import _handle_discover, _handle_inspect, _handle_whoami
 
-from .conftest import API_URL, OTHER_AGENT_ID, mock_agents, mock_org, mock_token
+from .conftest import API_URL, OTHER_AGENT_ID, mock_agents, mock_token, mock_whoami
 
 
 @pytest.fixture(autouse=True)
@@ -176,7 +176,7 @@ class TestWhoami:
     async def test_whoami_returns_org_and_live_handles(self):
         mock_token()
         mock_agents()
-        mock_org()
+        mock_whoami()
 
         out = await _handle_whoami({})
 

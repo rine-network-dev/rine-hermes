@@ -60,7 +60,6 @@ from .conftest import (
     message_payload,
     mock_agents,
     mock_recipient_keys,
-    mock_self_keys,
     mock_token,
     mock_two_agents,
     mock_webfinger,
@@ -73,7 +72,7 @@ from .conftest import (
 #: unreachable.
 MESSAGE_TOOLS = sorted(
     name
-    for name, (handler, _env) in _HANDLERS.items()
+    for name, handler in _HANDLERS.items()
     if handler.__module__ == "hermes_rine.tools.messaging"
 )
 
@@ -95,7 +94,7 @@ def _route_sdk_to_config(config_dir, monkeypatch):
 def self_message(config_dir: str, text: str, **kwargs) -> dict:
     """A server message row this agent can really decrypt and verify."""
     return message_payload(
-        encryption_version=EncryptionVersion.HPKE_V1,
+        encryption_version=EncryptionVersion.HPKE_HYBRID_V2,
         encrypted_payload=hpke_self_encrypt(config_dir, {"text": text}),
         **kwargs,
     )
@@ -151,7 +150,7 @@ class TestSingleAgentOrgIsUnchanged:
     async def test_a_read_naming_no_agent_sends_the_request_it_sent_before(self, config_dir):
         mock_token()
         mock_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         route = respx.get(f"{API_URL}/messages/{MESSAGE_ID}").mock(
             return_value=httpx.Response(200, json=self_message(config_dir, "hello"))
         )
@@ -172,7 +171,7 @@ class TestSingleAgentOrgIsUnchanged:
     async def test_a_thread_read_naming_no_agent_reads_as_the_orgs_only_agent(self, config_dir):
         mock_token()
         mock_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         route = respx.get(f"{API_URL}/conversations/{GROUP_CONVERSATION_ID}/messages").mock(
             return_value=httpx.Response(200, json={"messages": []})
         )
@@ -210,7 +209,7 @@ class TestATwoAgentOrgCanReadAgain:
     async def test_a_read_that_names_the_acting_agent_returns_the_plaintext(self, config_dir):
         mock_token()
         mock_two_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         route = respx.get(f"{API_URL}/messages/{MESSAGE_ID}").mock(
             return_value=httpx.Response(200, json=self_message(config_dir, "the standup moved"))
         )
@@ -227,7 +226,7 @@ class TestATwoAgentOrgCanReadAgain:
         # description tells the model to, and read the backlog with it.
         mock_token()
         mock_two_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         respx.get(f"{API_URL}/groups").mock(
             return_value=httpx.Response(
                 200, json={"items": [group_payload(conversation_id=GROUP_CONVERSATION_ID)]}
@@ -260,7 +259,7 @@ class TestATwoAgentOrgCanReadAgain:
         # this call just handed over would arrive again on the next check.
         mock_token()
         mock_two_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         inbox = respx.get(f"{API_URL}/agents/{AGENT_ID}/messages").mock(
             return_value=httpx.Response(200, json={"items": [self_message(config_dir, "morning")]})
         )
@@ -279,7 +278,7 @@ class TestATwoAgentOrgCanReadAgain:
     async def test_a_reply_names_the_acting_agent_on_the_wire(self, config_dir):
         mock_token()
         mock_two_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         respx.get(f"{API_URL}/messages/{MESSAGE_ID}").mock(
             return_value=httpx.Response(200, json=self_message(config_dir, "ping"))
         )
@@ -299,7 +298,7 @@ class TestATwoAgentOrgCanReadAgain:
         mock_token()
         mock_two_agents()
         mock_webfinger()
-        mock_recipient_keys(config_dir)
+        mock_recipient_keys()
         route = respx.post(f"{API_URL}/messages/sync").mock(
             return_value=httpx.Response(
                 200, json={"message": sent_message_payload(), "reply": None}

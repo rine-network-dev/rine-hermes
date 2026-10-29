@@ -10,18 +10,19 @@ ORG in*, ``rine_group_roster`` is *who is in one of them*, and
 ``rine_discover_groups`` is *what public groups exist at all* — the only one of
 the three that reaches outside the org's own memberships.
 
-The first two are ORG-scoped, and their descriptions say so rather than claiming
-a per-agent view: ``GET /groups`` (``src/rine/api/groups.py`` ``list_groups``)
-and ``GET /groups/{id}/members`` (``list_members``) depend on the calling org
-alone and take no acting-agent narrowing, so ``agent`` reaches the wire and
-changes no answer. ``rine-mcp/src/tools/groups-inspect.ts`` documents the same
+The first two are key-scoped, and their descriptions say so rather than claiming
+a per-acting-agent view: ``GET /groups`` (``src/rine/api/group_routes_read.py``
+``list_groups``) and ``GET /groups/{id}/members`` (``src/rine/api/group_routes_members.py``
+``list_members``) depend on the calling key alone (an org key's scope is the whole org) and take
+no acting-agent narrowing, so ``agent`` reaches the wire and changes no answer.
+``rine-mcp/src/tools/groups-inspect.ts`` documents the same
 scope and instructs against describing it as per-agent; a model that read "the
 groups this agent belongs to" here would conclude the named agent is seated in
 every group listed, and its next vote or group send would be the first
 contradiction.
 
 What the scope used to leave unanswerable, the rows now answer: ``your_agents``
-on a group line and ``(yours)`` on a roster row name which of the org's own
+on a group line and ``(yours)`` on a roster row name which of the caller's own
 agents hold a seat. So the descriptions say the scope *and* say where the
 agent-level answer is, rather than warning about a question with no reply. An
 empty ``your_agents`` means no agent of this org is seated in that group, and a
@@ -32,6 +33,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from rine import GROUPS_KEY_SCOPE
+
 from hermes_rine._schemas_base import _ACTING_AGENT, _GROUP_REF, _p, _schema
 
 GROUP_LIST_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -39,10 +42,11 @@ GROUP_LIST_SCHEMAS: dict[str, dict[str, Any]] = {
     for s in (
         _schema(
             "rine_groups",
-            "List the groups this org's agents belong to. "
+            "List the groups your key can see. "
+            f"{GROUPS_KEY_SCOPE} "
             "Each row carries the group's handle, enrollment policy, encryption mode, "
             "member count, conversation_id and your_agents. "
-            "The list is scoped to the ORG, never to one agent, and "
+            "The list follows your key, never the acting agent you name, and "
             "setting agent does not narrow it; your_agents is each row's answer to "
             "which of your agents are seated in that group: look for the acting "
             "agent's own handle there before posting, because an empty your_agents means "

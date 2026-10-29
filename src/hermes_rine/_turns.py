@@ -38,6 +38,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hermes_rine._tool_answers import TOOL_ANSWERS
+
 
 @dataclass(frozen=True)
 class InboundTurn:
@@ -47,6 +49,10 @@ class InboundTurn:
     message_type: str
     session_key: str
     x402: bool = False
+    #: The inbound message's conversation and, for group mail, its group handle: where a
+    #: rine tool must have sent for the model to have answered this turn already.
+    conversation_id: str = ""
+    group_handle: str | None = None
 
 
 class InboundTurns:
@@ -56,20 +62,37 @@ class InboundTurns:
         self._turns: dict[str, InboundTurn] = {}
 
     def begin(self, message_id: str, turn: InboundTurn) -> None:
-        """Open ``message_id``'s turn (wake guard + outbound context for its chat)."""
+        """Open ``message_id``'s turn (wake guard + outbound context for its chat).
+
+        The first turn of a session starts with a clean ledger: a send a tool made on the
+        session while no turn ran answers nothing here.
+        """
+        if not self.has_session(turn.session_key):
+            TOOL_ANSWERS.forget(turn.session_key)
         self._turns[message_id] = turn
 
     def end(self, message_id: str) -> None:
-        """Close a turn once it has completed, or failed to schedule at all."""
+        """Close a turn once it has completed, or failed to schedule at all.
+
+        The oldest turn of a session is the one that ran, so closing it also drops what its
+        tools delivered (``_tool_answers``); a queued turn that never ran leaves them alone.
+        """
+        turn = self._turns.get(message_id)
+        if turn is not None and self.oldest_for_session(turn.session_key) == message_id:
+            TOOL_ANSWERS.forget(turn.session_key)
         self._turns.pop(message_id, None)
 
     def __contains__(self, message_id: object) -> bool:
         """True while that message id's turn is running (no re-dispatch, no re-ack)."""
         return message_id in self._turns
 
+    def get(self, message_id: str | None) -> InboundTurn | None:
+        """The turn ``message_id`` woke, or None once it is over."""
+        return self._turns.get(message_id) if message_id else None
+
     def message_type(self, message_id: str | None) -> str | None:
         """The type the inbound message carried, or None once its turn is over."""
-        turn = self._turns.get(message_id) if message_id else None
+        turn = self.get(message_id)
         return turn.message_type if turn is not None else None
 
     def in_chat(self, chat_id: str) -> bool:

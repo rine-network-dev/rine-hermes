@@ -43,12 +43,16 @@ NOT_PAYMENT_REQUIRED = "not-payment-required"
 POLICY_REFUSED = "policy-refused"
 ABOVE_AUTO_PAY_THRESHOLD = "above-auto-pay-threshold"
 ALREADY_PAID = "already-paid"
+INAUTHENTIC_QUOTE = "inauthentic-quote"
+SENDER_UNVERIFIABLE = "sender-unverifiable"
 
 # Map the structured X402Error codes to the payer status vocabulary. Anything not a
 # wallet-lock / replay is a policy refusal (deny-by-default, caps, bad requirement).
 _STATUS_FOR_CODE = {
     X402ErrorCode.WALLET_BUSY: "wallet-busy",
     X402ErrorCode.ALREADY_PAID: ALREADY_PAID,
+    X402ErrorCode.INAUTHENTIC_SENDER: INAUTHENTIC_QUOTE,
+    X402ErrorCode.SENDER_UNVERIFIABLE: SENDER_UNVERIFIABLE,
 }
 
 
@@ -112,7 +116,13 @@ async def prepare_and_send_payment(
         if auto_pay and not _auto_payable(config_dir, agent_id, pr):
             return PayOutcome(ABOVE_AUTO_PAY_THRESHOLD, detail="quote exceeds autoPayThreshold")
         prepared = prepare_payment(
-            config_dir, agent_id, pr, message_id=str(msg.id), force=force, add_marker=add_marker
+            config_dir,
+            agent_id,
+            pr,
+            quote=msg,
+            message_id=str(msg.id),
+            force=force,
+            add_marker=add_marker,
         )
     except X402Error as err:
         return PayOutcome(_STATUS_FOR_CODE.get(err.code, POLICY_REFUSED), detail=err.message)

@@ -55,7 +55,6 @@ from .conftest import (
     mock_agents,
     mock_group_row,
     mock_recipient_keys,
-    mock_self_keys,
     mock_token,
     mock_two_agents,
     mock_webfinger,
@@ -172,7 +171,7 @@ class TestNamingTheActingAgent:
         # The case a constructor-only wiring misses: this read resolves no agent
         # id of its own, so the header exists only if the call carries the agent.
         # What that buys is uniformity, never a narrower answer — the route is
-        # org-scoped (`list_members`), so this asserts the wire and nothing about
+        # credential-scoped (`list_members`), so this asserts the wire and nothing about
         # the result.
         mock_token()
         mock_agents()
@@ -329,7 +328,7 @@ class TestTwoAgentOrg:
         mock_token()
         mock_two_agents()
         mock_webfinger()
-        mock_recipient_keys(config_dir)
+        mock_recipient_keys()
         route = respx.post(f"{API_URL}/messages").mock(
             return_value=httpx.Response(200, json=sent_message_payload())
         )
@@ -349,7 +348,7 @@ class TestTwoAgentOrg:
         mock_token()
         mock_two_agents()
         mock_webfinger()
-        mock_recipient_keys(config_dir)
+        mock_recipient_keys()
         respx.post(f"{API_URL}/messages").mock(
             return_value=httpx.Response(200, json=sent_message_payload())
         )
@@ -367,12 +366,12 @@ class TestTwoAgentOrg:
         # advertises never got as far as being used.
         mock_token()
         mock_two_agents()
-        mock_self_keys(config_dir)
+        mock_recipient_keys(AGENT_ID)
         route = respx.get(f"{API_URL}/messages/{MESSAGE_ID}").mock(
             return_value=httpx.Response(
                 200,
                 json=message_payload(
-                    encryption_version=EncryptionVersion.HPKE_V1,
+                    encryption_version=EncryptionVersion.HPKE_HYBRID_V2,
                     encrypted_payload=hpke_self_encrypt(config_dir, {"text": "hello"}),
                     msg_type="rine.v1.task_request",
                 ),
@@ -470,7 +469,7 @@ class TestTheDeploymentWideAgent:
         mock_token()
         mock_two_agents()
         mock_webfinger()
-        mock_recipient_keys(config_dir)
+        mock_recipient_keys()
         route = respx.post(f"{API_URL}/messages").mock(
             return_value=httpx.Response(200, json=sent_message_payload())
         )

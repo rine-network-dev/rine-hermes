@@ -60,7 +60,7 @@ class TestNotFoundRemedies:
         The public directory answers only ``visibility == "public"``, so naming it
         alone sends a member of a PRIVATE group to a search that structurally
         cannot resolve their group. ``rine_groups`` lists every group the caller's
-        org holds a seat in, public or private, which is what a mistyped handle on
+        credential can see, public or private, which is what a mistyped handle on
         a send almost always is. The ORDER is deliberate, so it is asserted.
 
         The detail here is the server's own bare literal — the one 404 that still

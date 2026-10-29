@@ -20,11 +20,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from rine.x402 import FEATURED_FACILITATOR, FacilitatorClient, X402Error, fulfill
+from rine.x402 import FEATURED_FACILITATOR, FacilitatorClient, X402Error, X402ErrorCode, fulfill
 from tools.registry import tool_error, tool_result  # type: ignore[import-not-found]
 
 from hermes_rine._client import _format_error, acting_agent, build_client, settle_actor
-from hermes_rine._payer import prepare_and_send_payment
+from hermes_rine._payer import SENDER_UNVERIFIABLE, prepare_and_send_payment
 
 
 async def _handle_pay(args: dict[str, Any], **_: Any) -> str:
@@ -104,6 +104,8 @@ async def _handle_fulfill(args: dict[str, Any], **_: Any) -> str:
                     add_marker=bool(args.get("emit_marker", True)),
                 )
     except X402Error as err:
+        if err.code == X402ErrorCode.SENDER_UNVERIFIABLE:
+            return tool_result(status=SENDER_UNVERIFIABLE, settled=False, reason=err.message)
         return tool_error(f"cannot fulfill message {message_id}: {err.message}")
     except Exception as err:  # noqa: BLE001 — surface as a tool message, never crash
         return tool_error(_format_error(err))

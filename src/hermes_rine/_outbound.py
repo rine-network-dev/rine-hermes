@@ -9,9 +9,8 @@ id>`` (``gateway/platforms/base.py``); its interim "thinking" narration and Herm
 operator notices — the home-channel prompt among them — carry neither. An A2A peer stores
 and is billed for every message it receives, and interim narration is this agent's
 reasoning *about* that peer, so within a turn an inbound rine message woke, only the
-final answer leaves. Either marker on its own is enough, so a change to one of them
-upstream cannot silence the channel. ``RINE_RELAY_INTERIM=1`` relays every gateway send
-for anyone who wants the narration too.
+final answer leaves. Either marker alone is enough, so an upstream change to one cannot
+silence the channel. ``RINE_RELAY_INTERIM=1`` relays every gateway send.
 
 **Everything the host originates on its own is relayed.** A cron job delivering to
 ``RINE_HOME_CHANNEL`` and the agent's ``send_message`` tool both reach ``send`` with
@@ -27,14 +26,12 @@ in-flight turns record (``_turns``).
 defines. Every other type, including a third-party ``com.acme.v1.*``, is mirrored
 verbatim. An absent or unrecognised inbound type replies ``rine.v1.task_response``.
 
-**A failed turn says so.** Hermes' own crash text is written for a person in a chat
-window and is sent while the failed turn is still in flight, so it stays inside Hermes by
-the first rule; the adapter sends a ``rine.v1.error`` in its place and the peer learns the
-request failed instead of waiting on silence.
+**A failed turn says so.** Hermes' crash text is written for a person in a chat window and
+is sent mid-turn, so the first rule keeps it inside Hermes; the adapter sends a
+``rine.v1.error`` instead, so the peer learns the request failed rather than waiting.
 
-``rine_send`` and ``rine_reply`` never pass through here — they build their own client and
-address the peer directly, which is what makes them the way an agent sends a message it
-decided to send.
+``rine_send`` and ``rine_reply`` address the peer directly and note what they delivered
+(``_tool_answers``); a turn they already answered sends no final text.
 """
 
 from __future__ import annotations
@@ -46,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 from rine import MessageType
 
 from hermes_rine._client import _format_error
+from hermes_rine._tool_answers import already_answered
 
 if TYPE_CHECKING:
     from gateway.platforms.base import (  # type: ignore[import-not-found]
@@ -112,6 +110,8 @@ async def route_reply(
     if not should_relay(adapter, chat_id, reply_to, metadata):
         logger.debug("[rine] not relaying interim chatter of a woken turn to %s", chat_id)
         return SendResult(success=True)
+    if already_answered(adapter, reply_to):
+        return SendResult(success=True)
     message_type = reply_type_for(adapter.turns.message_type(reply_to))
     return await _deliver(adapter, chat_id, content, reply_to, message_type)
 
@@ -142,15 +142,15 @@ async def _deliver(
     A group answer is a **broadcast**, never a threaded reply. MEASURED (session 22; pinned
     by ``tests/test_group-one-conversation_group0.py`` in the server repo): a group post has
     no single recipient (``to_agent_id IS NULL``), so ``POST /messages/{id}/reply`` refuses
-    it outright — 404 *Destination agent not found* for the poster's own org, 404 *Message
-    not found* for every other member org. ZERO reply rows are created. So threading a group
-    answer would not deliver it privately to one member; the call would raise, the ``except``
-    below would turn it into ``SendResult(success=False)``, and the group would hear nothing.
+    it outright — 404 *Destination agent not found* for the poster, 403 for a same-org sibling
+    that did not write it, 404 *Message not found* for every other member org. ZERO reply rows
+    are created. So threading a group answer would not deliver it privately to one member;
+    the call would raise, the ``except`` below would turn it into ``SendResult(success=False)``,
+    and the group would hear nothing.
 
-    🔴 ``messages.py``'s ``reply_is_group_carve_out`` branch looks like it files exactly such
-    a reply into its own conversation. It is UNREACHABLE for a real group post — it sits
-    after the recipient lookup that 404s. Do not read it as the server handling this case and
-    drop the ``_is_group`` guard below.
+    🔴 Behind those 404s the server's ``messages_reply_guards.refuse_group_post`` refuses any
+    row carrying a group with 422, so no reply to a group post is ever filed anywhere. It is a
+    refusal, not the server handling this case: do not drop the ``_is_group`` guard below.
 
     A Funnel ``rine.v1.webhook`` is relayed as the agent itself (``from == to``), so the
     gateway's reply target for one is THIS agent. rine forbids self-sends (422) and a

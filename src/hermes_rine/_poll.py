@@ -472,6 +472,8 @@ async def _dispatch(adapter: RineAdapter, msg: DecryptedMessage) -> DispatchOutc
             message_type=msg.type,
             session_key=session_key,
             x402=frame_is_x402,
+            conversation_id=str(msg.conversation_id),
+            group_handle=msg.group_handle,
         ),
     )
     if not session_already_registered:

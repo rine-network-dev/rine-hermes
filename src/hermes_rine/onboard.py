@@ -16,6 +16,7 @@ import argparse
 import sys
 
 from rine import (
+    PHRASE_INSTRUCTION,
     SyncRineClient,
     compare_verification_words_for_agent,
     onboard,
@@ -47,7 +48,7 @@ def run_onboard(
         org_name: Human-readable org name.
         agent_name: Name for the agent to create.
         api_url: API base URL (defaults to the SDK resolution).
-        config_dir: Config dir to write credentials/keys into (defaults to SDK chain).
+        config_dir: Runtime config dir for the agent's keys and profile (defaults to SDK chain).
 
     Returns:
         The created agent's handle.
@@ -56,7 +57,7 @@ def run_onboard(
     resolved_dir = config_dir or resolve_config_dir()
 
     print(f"Registering org '{org_name}' ({org_slug}) at {resolved_url} ...", flush=True)
-    onboard(
+    registration = onboard(
         api_url=resolved_url,
         config_dir=resolved_dir,
         email=email,
@@ -65,6 +66,9 @@ def run_onboard(
         on_progress=_print_pct,
     )
     print("Org registered. Creating agent ...", flush=True)
+    print(f"Org verification words: {registration.org_words}")
+    print(f"Recovery phrase file:   {registration.phrase_path}")
+    print(PHRASE_INSTRUCTION)
 
     with SyncRineClient(config_dir=resolved_dir, api_url=resolved_url) as client:
         agent = client.create_agent(agent_name)

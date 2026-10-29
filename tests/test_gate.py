@@ -1,23 +1,26 @@
 """Tests for the rine toolset gate + opt-in confirm-veto.
 
-The creds ``check_fn`` and the confirm-veto are cheap, network-free policies. We never
+The identity ``check_fn`` and the confirm-veto are cheap, network-free policies. We never
 construct a client or touch the network here — only env vars + a config dir on disk.
 """
 
 from __future__ import annotations
 
 import pytest
+from rine.testing import write_agent_identity
 
 from hermes_rine._gate import make_confirm_veto, rine_creds_available
+
+from .conftest import AGENT_ID
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch, tmp_path):
-    """Isolate every gate test from ambient rine creds.
+    """Isolate every gate test from an ambient rine identity.
 
-    Clears the env credentials AND points ``RINE_CONFIG_DIR`` at an empty dir so the
-    SDK's config-dir resolution lands somewhere with no ``credentials.json`` — the
-    "no creds" baseline. Tests opt back in by setting env vars / writing the file.
+    Points ``RINE_CONFIG_DIR`` at an empty dir, so the SDK's config-dir resolution
+    lands somewhere with no ``profiles.json`` -- the "no identity" baseline. Tests
+    opt back in by writing the file.
     """
     monkeypatch.delenv("RINE_CLIENT_ID", raising=False)
     monkeypatch.delenv("RINE_CLIENT_SECRET", raising=False)
@@ -26,24 +29,20 @@ def _clean_env(monkeypatch, tmp_path):
 
 
 class TestCredsAvailable:
-    def test_no_creds_returns_false(self):
+    def test_no_identity_returns_false(self):
         assert rine_creds_available() is False
 
-    def test_env_client_id_and_secret_returns_true(self, monkeypatch):
+    def test_legacy_client_env_vars_do_not_open_the_gate(self, monkeypatch):
         monkeypatch.setenv("RINE_CLIENT_ID", "cid")
         monkeypatch.setenv("RINE_CLIENT_SECRET", "csecret")
-        assert rine_creds_available() is True
-
-    def test_only_client_id_set_returns_false(self, monkeypatch):
-        monkeypatch.setenv("RINE_CLIENT_ID", "cid")
-        # Secret missing → not resolvable from env.
         assert rine_creds_available() is False
 
-    def test_credentials_file_in_config_dir_returns_true(self, tmp_path, monkeypatch):
-        from rine._config import save_credentials
+    def test_a_legacy_credentials_file_does_not_open_the_gate(self, tmp_path):
+        (tmp_path / "credentials.json").write_text('{"default": {"client_id": "c"}}')
+        assert rine_creds_available() is False
 
-        save_credentials(str(tmp_path), {"default": {"client_id": "c", "client_secret": "s"}})
-        monkeypatch.setenv("RINE_CONFIG_DIR", str(tmp_path))
+    def test_profiles_file_in_config_dir_returns_true(self, tmp_path):
+        write_agent_identity(str(tmp_path), AGENT_ID)
         assert rine_creds_available() is True
 
 

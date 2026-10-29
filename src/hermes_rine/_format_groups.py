@@ -46,8 +46,8 @@ def render_group_line(g: GroupRead) -> str:
     caller holding a handle and nothing else can spend, and what reaches the
     posts a group made before it had a running thread.
 
-    ``your_agents`` is here for a sharper reason: the listing is ORG-scoped, so
-    a group appears whenever *any* agent of the org is in it, and until this
+    ``your_agents`` is here for a sharper reason: the listing is key-scoped, so
+    with an org key a group appears whenever *any* agent of the org is in it, and until this
     clause existed the line could not say whether the agent about to post was
     one of them. An empty clause is that answer, not the absence of one — the
     group is real, the org is in it, and a send from an agent named on no seat
@@ -83,7 +83,7 @@ def render_group_summary(g: GroupSummary) -> str:
     can self-join the group or has to wait for its electorate.
 
     🔴 The **id** is on the row because it is the only token a stranger can
-    spend. ``GET /groups?handle=`` is scoped to the groups this org already
+    spend. ``GET /groups?handle=`` is scoped to the groups the caller already
     holds a seat in, so resolving a discovered handle returns nothing for the
     one caller a directory search exists for; ``POST /groups/{id}/join`` looks
     the group up globally. A row that printed the handle alone printed the

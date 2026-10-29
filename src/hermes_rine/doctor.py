@@ -1,7 +1,7 @@
 """``python -m hermes_rine.doctor`` — find out why the plugin is not working.
 
 Every way this plugin goes quiet is silent by design: the toolset hides itself when no
-credential resolves, Hermes logs an entry-point miss at DEBUG, and an inbox that nothing
+identity resolves, Hermes logs an entry-point miss at DEBUG, and an inbox that nothing
 is polling looks exactly like an inbox with no mail. This walks the same five conditions
 the plugin itself checks, in the order they gate each other, and says what to do about the
 first one that fails.
@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from rine import PROFILES_FILE
 
 _OK = "ok"
 _FAIL = "FAIL"
@@ -32,9 +34,7 @@ class Check:
 
 
 def _credentials(config_dir: str | None) -> Check:
-    """Report whether a credential resolves at all — nothing else matters until it does."""
-    if os.getenv("RINE_CLIENT_ID") and os.getenv("RINE_CLIENT_SECRET"):
-        return Check("credentials", _OK, "RINE_CLIENT_ID/RINE_CLIENT_SECRET are set")
+    """Report whether an identity resolves at all — nothing else matters until it does."""
     if config_dir is None:
         return Check(
             "credentials",
@@ -43,21 +43,20 @@ def _credentials(config_dir: str | None) -> Check:
             "Run `python -m hermes_rine.onboard --email you@yourdomain.com --org-slug "
             "myorg --org-name 'My Org' --agent-name assistant`, or set RINE_CONFIG_DIR.",
         )
-    path = Path(config_dir) / "credentials.json"
+    path = Path(config_dir) / PROFILES_FILE
     if path.is_file():
         return Check("credentials", _OK, f"found {path}")
     return Check(
         "credentials",
         _FAIL,
-        f"no credentials.json in {config_dir}",
+        f"no {PROFILES_FILE} in {config_dir}",
         "Onboard with `python -m hermes_rine.onboard`, or point RINE_CONFIG_DIR at the "
-        "directory that already holds credentials.json, or set "
-        "RINE_CLIENT_ID/RINE_CLIENT_SECRET.",
+        f"directory that already holds {PROFILES_FILE} and the agent's keys.",
     )
 
 
 def _readable(config_dir: str | None) -> Check:
-    """Report whether this process's user can read the credential and key files."""
+    """Report whether this process's user can read the profile and key files."""
     if config_dir is None:
         return Check("file access", _WARN, "no config directory to check")
     unreadable = [
@@ -88,8 +87,8 @@ def _durable(config_dir: str | None) -> Check:
         "durability",
         _FAIL,
         f"{config_dir} is inside the container filesystem, not a mount",
-        "The signing and encryption keys are this agent's identity and cannot be "
-        "regenerated — recreating the container loses them and the handle with them. "
+        "The agent's leaf keys live here. Recreating the container loses them, and "
+        "getting them back needs the org's recovery phrase (`rine org recover`). "
         "Mount a host directory and point RINE_CONFIG_DIR at it.",
     )
 
@@ -125,7 +124,7 @@ def _authenticates(config_dir: str | None) -> Check:
     from rine import SyncRineClient
 
     try:
-        client = SyncRineClient(config_dir=config_dir) if config_dir else SyncRineClient()
+        client = SyncRineClient(config_dir=config_dir, agent_only=True)
         with client:
             me = client.whoami()
     except Exception as err:  # noqa: BLE001 — report the reason rather than a traceback
